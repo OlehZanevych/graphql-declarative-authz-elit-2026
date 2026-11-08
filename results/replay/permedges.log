@@ -1,0 +1,27 @@
+parsed 32 @GraphQLEntity classes from /home/claude/repo2/r/app/src/main/java/org/lnu/timetable/domain
+  39 foreign-key edges, 5 join-table edges, 2 root(s)
+permission-edges.tsv already matches the source: no drift
+
+wrote /home/claude/repo2/r/replay/permission-edges.tsv
+
+source metrics: {
+  entities: 32,
+  frameworkFiles: 33,
+  frameworkLines: 2970,
+  declarationFiles: 4,
+  declarationLines: 1052,
+  types: 32,
+  queries: 44,
+  mutations: 72,
+  paged: 22,
+  relationFilters: 7,
+  handWrittenAreas: 4,
+  handWrittenLines: 699,
+  handWrittenNames: [
+    'TimetableGenerationSchema',
+    'AccessModelSchema',
+    'GroupInvitationSchema',
+    'SelfServiceSchema'
+  ]
+}
+wrote /home/claude/repo2/r/results/replay/source-facts.tex

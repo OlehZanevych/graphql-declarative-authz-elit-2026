@@ -1,0 +1,15 @@
+{
+ "pg": "16.15",
+ "java": "25.0.2",
+ "cpus": 2,
+ "mem_gib": 7.8,
+ "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+ "rtt_direct_us": [
+  115,
+  120
+ ],
+ "rtt_relay_us": [
+  1327,
+  1223
+ ]
+}

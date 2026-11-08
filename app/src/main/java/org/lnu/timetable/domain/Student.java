@@ -1,0 +1,33 @@
+package org.lnu.timetable.domain;
+
+import lombok.Data;
+import org.lnu.timetable.framework.annotation.Description;
+import org.lnu.timetable.framework.annotation.GraphQLEntity;
+import org.lnu.timetable.framework.annotation.ManyToOne;
+import org.lnu.timetable.framework.annotation.Nullable;
+import org.lnu.timetable.framework.annotation.PermissionParent;
+
+@Data
+@GraphQLEntity(table = "students")
+@PermissionParent(value = AcademicGroup.class, joinColumn = "academic_group_id")
+public class Student {
+
+    private Long id;
+
+    private String firstName;
+
+    @Nullable
+    private String middleName;
+
+    private String lastName;
+
+    @Nullable
+    private String email;
+
+    @Nullable
+    @Description("Record book (залікова книжка) number")
+    private String recordBookNumber;
+
+    @ManyToOne(joinColumn = "academic_group_id")
+    private AcademicGroup academicGroup;
+}

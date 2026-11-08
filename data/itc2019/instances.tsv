@@ -1,0 +1,11 @@
+instance	set	git_blob_sha1	bytes	url
+agh-ggis-spr17	early	cd65580c6e1f034d36f70e69fedbe04aa823358e	6104124	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/agh-ggis-spr17.xml
+bet-fal17	early	99f1f7d3ed4a0b8f29251f96d25d84ff6ecd30ee	4068716	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/bet-fal17.xml
+iku-fal17	early	f6635d6d9cd9ae1ee6a4b055f2df39e3f1630907	13226528	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/iku-fal17.xml
+lums-spr18	middle	34ed74e6bb007f940942c8d8c6abc1fb908c0ce9	3183899	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/middle/lums-spr18.xml
+mary-spr17	early	aa2d721856c77ec93e2611f3562c44ce89a3938d	3089281	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/mary-spr17.xml
+muni-fi-spr16	early	89d30dbc860624924b63fac76c9bbbbb125b96b2	1474708	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/muni-fi-spr16.xml
+nbi-spr18	middle	5b232d5ef4a3079c866dd83f31a4e6cfe83ef7af	3701942	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/middle/nbi-spr18.xml
+pu-llr-spr17	early	0fa5fdcb97ba31cad942ee1dacbc747ca11bb5fd	4924255	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/pu-llr-spr17.xml
+tg-fal17	early	e288a6d25a71e702d7580a60d16dc0ff2cc76afe	2038566	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/early/tg-fal17.xml
+yach-fal17	middle	734042cbcc6d7a60ba6f177d81b08239303c84fc	2149561	https://raw.githubusercontent.com/DepartureZSH/ITC2019/main/data/middle/yach-fal17.xml

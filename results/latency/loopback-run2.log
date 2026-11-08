@@ -1,0 +1,61 @@
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by io.netty.util.internal.NativeLibraryUtil in an unnamed module (jar:nested:/home/claude/repo2/r/app/target/timetable-0.0.1-SNAPSHOT.jar/!BOOT-INF/lib/netty-common-4.2.12.Final.jar!/)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+check Course/1                       set=     6 stmts  perrow=      6 stmts  answered=1/1  equal=true
+check Course/10                      set=     6 stmts  perrow=     42 stmts  answered=10/10  equal=true
+check Course/50                      set=     6 stmts  perrow=    192 stmts  answered=50/50  equal=true
+check Course/200                     set=     6 stmts  perrow=    812 stmts  answered=200/200  equal=true
+check TimetableEntry/1               set=    18 stmts  perrow=     38 stmts  answered=1/1  equal=true
+check TimetableEntry/10              set=    24 stmts  perrow=    371 stmts  answered=10/10  equal=true
+check TimetableEntry/50              set=    24 stmts  perrow=   2014 stmts  answered=50/50  equal=true
+check TimetableEntry/200             set=    25 stmts  perrow=   7559 stmts  answered=200/200  equal=true
+check TimetableEntry/1381            set=    25 stmts  perrow=  43033 stmts  answered=1381/1381  equal=true
+check LecturerWorkload/1             set=    16 stmts  perrow=     62 stmts  answered=1/1  equal=true
+check LecturerWorkload/10            set=    16 stmts  perrow=    494 stmts  answered=10/10  equal=true
+check LecturerWorkload/50            set=    18 stmts  perrow=   2576 stmts  answered=50/50  equal=true
+check LecturerWorkload/200           set=    23 stmts  perrow=   8980 stmts  answered=84/200  equal=true
+check LecturerWorkload/500           set=    23 stmts  perrow=  16192 stmts  answered=384/500  equal=true
+check LecturerWorkloadCandidate/1    set=    17 stmts  perrow=     28 stmts  answered=1/1  equal=true
+check LecturerWorkloadCandidate/6    set=    18 stmts  perrow=    152 stmts  answered=6/6  equal=true
+run 2 warmup round 1 done
+run 2 warmup round 2 done
+run 2 warmup round 3 done
+run 2 warmup round 4 done
+run 2 warmup round 5 done
+run 2 warmup round 6 done
+run 2 warmup round 7 done
+run 2 warmup round 8 done
+run 2 warmup round 9 done
+run 2 warmup round 10 done
+run 2 measure round 11 done
+run 2 measure round 12 done
+run 2 measure round 13 done
+run 2 measure round 14 done
+run 2 measure round 15 done
+run 2 measure round 16 done
+run 2 measure round 17 done
+run 2 measure round 18 done
+run 2 measure round 19 done
+run 2 measure round 20 done
+run 2 measure round 21 done
+run 2 measure round 22 done
+run 2 measure round 23 done
+run 2 measure round 24 done
+run 2 measure round 25 done
+run 2 measure round 26 done
+run 2 measure round 27 done
+run 2 measure round 28 done
+run 2 measure round 29 done
+run 2 measure round 30 done
+run 2 measure round 31 done
+run 2 measure round 32 done
+run 2 measure round 33 done
+run 2 measure round 34 done
+run 2 measure round 35 done
+run 2 measure round 36 done
+run 2 measure round 37 done
+run 2 measure round 38 done
+run 2 measure round 39 done
+run 2 measure round 40 done

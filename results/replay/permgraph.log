@@ -1,0 +1,5 @@
+nodes 31, edges 44 (5 join, 15 nullable)
+entities with more than one parent: 9; self-referential: Course
+deepest chain: 10 edges from LecturerWorkloadCandidateConstraint
+top depths: LecturerWorkloadCandidateConstraint=10, LecturerWorkloadCandidate=9, LecturerWorkloadOnlineClass=9, LecturerWorkloadStudent=9, TimetableEntry=9
+wrote /home/claude/repo2/r/results/replay/graph-facts.tex

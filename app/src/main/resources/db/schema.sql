@@ -1,0 +1,1316 @@
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
+
+-- ============================ Collation ============================
+
+-- The database itself is very likely C.UTF-8 (the default on most installs), which sorts text by
+-- raw byte value. For Cyrillic that is wrong in a way that is immediately visible: 'І' is U+0406
+-- and 'А' is U+0410, so every surname starting with І/Ї/Є sorts *before* А. Declaring the columns
+-- people actually read as COLLATE ukrainian fixes ORDER BY everywhere at once, without needing the
+-- database to be recreated with a Ukrainian locale and without any application-side sorting hints.
+--
+-- Requires a Postgres built with ICU (standard from v15 on). If ICU is unavailable, substitute
+--     CREATE COLLATION ukrainian (provider = libc, locale = 'uk_UA.utf8');
+-- which needs that locale generated on the host.
+CREATE COLLATION ukrainian (provider = icu, locale = 'uk-UA');
+
+-- ============================ Global properties ============================
+
+CREATE TYPE property_type AS ENUM ('INTEGER', 'DECIMAL', 'STRING', 'BOOLEAN', 'ENUM');
+
+-- Generic system-wide configuration store (name/type/value triples). `value` is always stored as
+-- text; `type` tells consumers how to parse it.
+CREATE TABLE global_properties
+(
+    name  VARCHAR(100) PRIMARY KEY,
+    type  property_type NOT NULL,
+    value VARCHAR(255)  NOT NULL
+);
+
+-- ============================ Infrastructure: Buildings ============================
+
+CREATE TABLE buildings
+(
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(120) COLLATE ukrainian NOT NULL UNIQUE,
+    address     VARCHAR(160) COLLATE ukrainian,
+    city        VARCHAR(64)  COLLATE ukrainian,
+    postal_code VARCHAR(10)
+);
+
+-- How long it comfortably takes to get from one building to another. A group's day is a sequence of
+-- classes and the gap between two bells is fixed; when consecutive classes are in different корпуси
+-- that gap has to cover the journey, and this is where the length of that journey is written down.
+--
+-- Directed rather than a symmetric pair, and the two directions are allowed to disagree: Lviv is
+-- built on hills, and a climb with a bag is not the walk back down. No row from a building to
+-- itself — moving inside one building is not a journey between buildings, and a stored zero would
+-- be a value someone could edit into something else; a reader asking about one building gets
+-- nothing back and should read that as no travel at all.
+--
+-- Seeded by db/migration/V2__building_travel_times.sql, which also states where its numbers came
+-- from and that they are estimates. Read by the BuildingTravelTime entity (its connection, lookup
+-- and three mutations), by the client's «Час переходу між корпусами» matrix, and by the timetable
+-- generator as the hard terms Π₄/Π₅ of its objective.
+CREATE TABLE building_travel_times
+(
+    -- A surrogate key rather than the natural (from, to) pair, for the same reason every other
+    -- table here has one: the entity framework addresses a row by a single `id` — findById, the
+    -- update and delete mutations, the permission cascade — and a composite key has nowhere to go
+    -- in that. The pair is still the real identity, and the UNIQUE below is what says so.
+    id               BIGSERIAL PRIMARY KEY,
+    from_building_id BIGINT  NOT NULL REFERENCES buildings (id) ON DELETE CASCADE,
+    to_building_id   BIGINT  NOT NULL REFERENCES buildings (id) ON DELETE CASCADE,
+    -- Whole minutes: the bells are on a five-minute grid and nobody plans a walk to the second.
+    minutes          INTEGER NOT NULL CHECK (minutes >= 0),
+    UNIQUE (from_building_id, to_building_id),
+    CONSTRAINT building_travel_times_two_buildings CHECK (from_building_id <> to_building_id)
+);
+
+COMMENT ON TABLE building_travel_times IS
+    'Comfortable travel time between two buildings, in whole minutes. Directed: (from, to) and (to, from) may differ.';
+
+-- ============================ Organisational structure ============================
+
+CREATE TABLE faculties
+(
+    id           BIGSERIAL PRIMARY KEY,
+    name         VARCHAR(160) COLLATE ukrainian NOT NULL UNIQUE,
+    abbreviation VARCHAR(32)  COLLATE ukrainian UNIQUE,
+    website      VARCHAR(128),
+    email        VARCHAR(64),
+    phone        VARCHAR(128),
+    building_id  BIGINT REFERENCES buildings (id) ON DELETE SET NULL
+);
+
+CREATE TABLE departments
+(
+    id           BIGSERIAL PRIMARY KEY,
+    name         VARCHAR(160) COLLATE ukrainian NOT NULL UNIQUE,
+    abbreviation VARCHAR(32)  COLLATE ukrainian UNIQUE,
+    faculty_id   BIGINT NOT NULL REFERENCES faculties (id) ON DELETE CASCADE,
+    email        VARCHAR(64),
+    phone        VARCHAR(64)
+);
+
+CREATE TYPE degree AS ENUM ('JUNIOR_BACHELOR', 'BACHELOR', 'MASTER', 'PHD', 'DOCTOR_OF_SCIENCE');
+
+CREATE TABLE degree_programs
+(
+    id                 BIGSERIAL PRIMARY KEY,
+    code               VARCHAR(16)  COLLATE ukrainian NOT NULL,
+    name               VARCHAR(160) COLLATE ukrainian NOT NULL,
+    degree             degree       NOT NULL,
+    faculty_id         BIGINT       NOT NULL REFERENCES faculties (id) ON DELETE CASCADE,
+    -- How long the programme runs, counted in semesters: 8 for a four-year bachelor's programme, 3 or
+    -- 4 for a master's depending on the programme. A count, not the number its last semester carries
+    -- — the two are the same only for a programme whose semesters start at 1, and in the current data
+    -- they often do not: some master's programmes number their semesters 9, 10, 11, carrying on from
+    -- the bachelor's degree they follow, while others start again at 1.
+    --
+    -- NOT NULL, and with no DEFAULT: every programme has a length, and the number of semesters a
+    -- розклад is planned across is not something the system should be guessing at. A DEFAULT would be
+    -- the guess — one number that is right for bachelor's programmes and wrong for every master's,
+    -- entered automatically and indistinguishable afterwards from one somebody chose.
+    duration_semesters INTEGER NOT NULL CHECK (duration_semesters > 0),
+    UNIQUE (name, degree)
+);
+
+-- How long one semester of one programme actually lasts, in teaching weeks.
+--
+-- The number of weekly classes a розклад has to place is hours ÷ (weeks × class length), and the
+-- weeks in that division come from the `semester_duration_weeks` global property — one number for
+-- the whole university. That holds for most of a degree and stops holding at the end of one: the last
+-- semester of a master's programme is largely taken up by the final attestation and a work placement,
+-- so its teaching runs for fewer weeks than the sixteen the property claims, and planning it as
+-- sixteen puts fewer classes a week on the timetable than the plan's hours actually require.
+--
+-- One row per semester that *differs*, rather than one per semester of every programme. A missing
+-- row is not missing data — it means «the usual length», which is exactly what the global property
+-- is for, and filling the table in exhaustively would turn one number that can be corrected in one
+-- place into several hundred copies of it that cannot.
+--
+-- `semester` is the number the plan itself uses — the same value curriculum_items.semester carries
+-- for this programme — because lining the two up is the entire purpose of the row. That numbering is
+-- the programme's own and is not necessarily 1-based: a master's programme whose plan runs 9, 10, 11
+-- states 9, 10, 11 here, not 1, 2, 3.
+--
+-- It is bounded below but not above. A CHECK cannot read degree_programs.duration_semesters from
+-- here, so a row naming a semester the programme does not have is accepted by the database and means
+-- nothing: no curriculum item carries that semester, so nothing is ever planned against it.
+CREATE TABLE degree_program_semesters
+(
+    id                BIGSERIAL PRIMARY KEY,
+    degree_program_id BIGINT  NOT NULL REFERENCES degree_programs (id) ON DELETE CASCADE,
+    semester          INTEGER NOT NULL CHECK (semester > 0),
+    -- Teaching weeks, replacing `semester_duration_weeks` for this one semester of this one
+    -- programme. Whole weeks, and greater than zero: a semester with no teaching weeks would make
+    -- the division above undefined rather than describing a semester anybody has.
+    duration_weeks    INTEGER NOT NULL CHECK (duration_weeks > 0),
+    -- A programme states each of its semesters' length at most once; re-stating it is an update of
+    -- this row rather than a second row meaning the same thing.
+    UNIQUE (degree_program_id, semester)
+);
+
+COMMENT ON TABLE degree_program_semesters IS
+    'Per-semester override of the semester_duration_weeks global property, for one degree programme. A semester with no row here runs for the global number of weeks.';
+
+-- ============================ People & groups ============================
+
+CREATE TABLE academic_degrees
+(
+    id           BIGSERIAL PRIMARY KEY,
+    name         VARCHAR(100) COLLATE ukrainian NOT NULL UNIQUE,
+    abbreviation VARCHAR(20)  COLLATE ukrainian,
+    level        INTEGER      NOT NULL
+);
+
+CREATE TYPE lecturer_position AS ENUM ('ASSISTANT', 'TEACHER', 'SENIOR_LECTURER', 'DOCENT', 'PROFESSOR', 'HEAD_OF_DEPARTMENT');
+
+CREATE TABLE lecturers
+(
+    id                   BIGSERIAL PRIMARY KEY,
+    first_name           VARCHAR(64)  COLLATE ukrainian NOT NULL,
+    middle_name          VARCHAR(64)  COLLATE ukrainian,
+    last_name            VARCHAR(64)  COLLATE ukrainian NOT NULL,
+    email                VARCHAR(64) UNIQUE,
+    position             lecturer_position,
+    academic_degree_id   BIGINT REFERENCES academic_degrees (id) ON DELETE SET NULL,
+    department_id        BIGINT NOT NULL REFERENCES departments (id) ON DELETE CASCADE
+);
+
+-- Workload restrictions for a lecturer, one row per constraint that is actually set. Replaces the
+-- former lecturers.min_hours_per_week / max_hours_per_week pair: the rules a real workload plan has
+-- to satisfy are per-year rather than per-week, and most of them bound a *count of distinct
+-- courses* rather than hours, so a fixed column per rule would mean two dozen mostly-NULL columns.
+--
+-- A lecturer with no row for a given constraint is unconstrained by it, except for
+-- MAX_HOURS_PER_YEAR, which falls back to the `default_max_hours_per_year` global property.
+--
+-- Naming: <MIN|MAX>_[MANDATORY|ELECTIVE]_[LECTURE|PRACTICAL|LAB]_COURSES counts *distinct courses*
+-- in which the lecturer runs classes of that hour type; MANDATORY/ELECTIVE narrow it to
+-- courses.course_type. MAX_COURSES bounds the distinct courses taught across all three taught hour
+-- types together. The remaining two are academic-hour totals for the whole academic year.
+CREATE TYPE lecturer_workload_constraint_type AS ENUM (
+    -- academic hours per academic year, across everything the lecturer teaches
+    'MIN_HOURS_PER_YEAR',
+    'MAX_HOURS_PER_YEAR',
+    -- distinct courses with any taught hour type (LECTURE, PRACTICAL or LAB)
+    'MAX_COURSES',
+    -- distinct courses, by hour type
+    'MIN_LECTURE_COURSES',
+    'MAX_LECTURE_COURSES',
+    'MIN_PRACTICAL_COURSES',
+    'MAX_PRACTICAL_COURSES',
+    'MIN_LAB_COURSES',
+    'MAX_LAB_COURSES',
+    -- distinct mandatory courses, by hour type
+    'MIN_MANDATORY_LECTURE_COURSES',
+    'MAX_MANDATORY_LECTURE_COURSES',
+    'MIN_MANDATORY_PRACTICAL_COURSES',
+    'MAX_MANDATORY_PRACTICAL_COURSES',
+    'MIN_MANDATORY_LAB_COURSES',
+    'MAX_MANDATORY_LAB_COURSES',
+    -- distinct elective courses, by hour type
+    'MIN_ELECTIVE_LECTURE_COURSES',
+    'MAX_ELECTIVE_LECTURE_COURSES',
+    'MIN_ELECTIVE_PRACTICAL_COURSES',
+    'MAX_ELECTIVE_PRACTICAL_COURSES',
+    'MIN_ELECTIVE_LAB_COURSES',
+    'MAX_ELECTIVE_LAB_COURSES'
+);
+
+CREATE TABLE lecturer_workload_constraints
+(
+    id              BIGSERIAL PRIMARY KEY,
+    lecturer_id     BIGINT NOT NULL REFERENCES lecturers (id) ON DELETE CASCADE,
+    constraint_type lecturer_workload_constraint_type NOT NULL,
+    value           INTEGER NOT NULL CHECK (value >= 0),
+    -- A constraint is set at most once per lecturer; re-setting it updates the existing row.
+    UNIQUE (lecturer_id, constraint_type)
+);
+
+CREATE TYPE study_form AS ENUM ('FULL_TIME', 'PART_TIME');
+
+CREATE TABLE academic_groups
+(
+    id                BIGSERIAL PRIMARY KEY,
+    name              VARCHAR(32) COLLATE ukrainian NOT NULL UNIQUE,
+    course_year       INTEGER     NOT NULL,
+    study_form        study_form  NOT NULL,
+    students_count    INTEGER,
+    degree_program_id BIGINT      NOT NULL REFERENCES degree_programs (id) ON DELETE CASCADE
+);
+
+CREATE TABLE combined_groups
+(
+    id      BIGSERIAL PRIMARY KEY,
+    name    VARCHAR(64)  COLLATE ukrainian NOT NULL UNIQUE,
+    purpose VARCHAR(200) COLLATE ukrainian
+);
+
+CREATE TABLE combined_group_academic_groups
+(
+    combined_group_id BIGINT NOT NULL REFERENCES combined_groups (id) ON DELETE CASCADE,
+    academic_group_id BIGINT NOT NULL REFERENCES academic_groups (id) ON DELETE CASCADE,
+    PRIMARY KEY (combined_group_id, academic_group_id)
+);
+
+CREATE TABLE students
+(
+    id                 BIGSERIAL PRIMARY KEY,
+    first_name         VARCHAR(64) COLLATE ukrainian NOT NULL,
+    middle_name        VARCHAR(64) COLLATE ukrainian,
+    last_name          VARCHAR(64) COLLATE ukrainian NOT NULL,
+    email              VARCHAR(64),
+    record_book_number VARCHAR(32),
+    academic_group_id  BIGINT NOT NULL REFERENCES academic_groups (id) ON DELETE CASCADE
+);
+
+-- ============================ Disciplines & curricula ============================
+
+CREATE TYPE course_type AS ENUM (
+    'MANDATORY',
+    'ELECTIVE_GROUP',
+    'ELECTIVE',
+    'OPTIONAL',
+    'INTERNSHIP',
+    'COURSE_PROJECT',
+    'COURSE_WORK',
+    'QUALIFICATION_WORK'
+);
+
+CREATE TABLE courses
+(
+    id               BIGSERIAL PRIMARY KEY,
+    name             VARCHAR(200) COLLATE ukrainian NOT NULL,
+    course_type      course_type  NOT NULL DEFAULT 'MANDATORY',
+    faculty_id       BIGINT REFERENCES faculties (id) ON DELETE SET NULL,
+    department_id    BIGINT REFERENCES departments (id) ON DELETE CASCADE,
+    parent_course_id BIGINT REFERENCES courses (id) ON DELETE CASCADE,
+    -- When set, this discipline may only be planned for this semester: every curriculum_items row
+    -- naming it must carry the same semester, and the UI offers no other. NULL means unrestricted,
+    -- which is every course unless somebody says otherwise. Used above all for an ELECTIVE_GROUP,
+    -- whose whole point is a slot the plan reserves in one particular semester.
+    semester         INTEGER CHECK (semester IS NULL OR semester > 0)
+);
+
+-- Degree programmes a course is allowed to be taught for; scopes which courses can be picked when
+-- adding a curriculum item to a programme's curriculum (see curriculum_items below).
+CREATE TABLE course_degree_programs
+(
+    course_id         BIGINT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    degree_program_id BIGINT NOT NULL REFERENCES degree_programs (id) ON DELETE CASCADE,
+    PRIMARY KEY (course_id, degree_program_id)
+);
+
+-- Free-form labels shown after a course's name (e.g. "English-taught"), one row per tag.
+CREATE TABLE course_tags
+(
+    id        BIGSERIAL PRIMARY KEY,
+    course_id BIGINT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    tag       VARCHAR(64) COLLATE ukrainian NOT NULL,
+    UNIQUE (course_id, tag)
+);
+
+CREATE TYPE control_form AS ENUM ('EXAM', 'CREDIT', 'GRADED_CREDIT');
+
+CREATE TABLE curriculum_items
+(
+    id                BIGSERIAL PRIMARY KEY,
+    semester          INTEGER      NOT NULL,
+    control_form      control_form NOT NULL,
+    ects_credits      INTEGER      NOT NULL,
+    degree_program_id BIGINT       NOT NULL REFERENCES degree_programs (id) ON DELETE CASCADE,
+    course_id         BIGINT       NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    UNIQUE (course_id, degree_program_id, semester)
+);
+
+-- Ordered as they should appear in a plan: contact teaching, then the contact work around it
+-- (consultations, assessment), then the student's own work. Enum order is also sort order —
+-- curriculumItemHoursConnection sorts by hour_type, which Postgres orders by declaration.
+CREATE TYPE hour_type AS ENUM ('LECTURE', 'PRACTICAL', 'LAB', 'CONSULTATION', 'ASSESSMENT', 'INDEPENDENT_WORK');
+
+CREATE TABLE curriculum_item_hours
+(
+    id                 BIGSERIAL PRIMARY KEY,
+    curriculum_item_id BIGINT NOT NULL REFERENCES curriculum_items (id) ON DELETE CASCADE,
+    hour_type          hour_type NOT NULL,
+    hours              INTEGER   NOT NULL,
+    UNIQUE (curriculum_item_id, hour_type)
+);
+
+-- TOGETHER    - one lecturer takes all the item's groups at once (a shared lecture stream)
+-- SEPARATELY  - the item's groups are split between lecturers, each taking whole groups
+-- INDIVIDUALLY - a lecturer works one-to-one with each student (e.g. coursework consultations),
+--               so the workload scales with student count rather than with group count
+CREATE TYPE teaching_format AS ENUM ('TOGETHER', 'SEPARATELY', 'INDIVIDUALLY');
+
+CREATE TABLE working_curriculum_items
+(
+    id                       BIGSERIAL PRIMARY KEY,
+    curriculum_item_hours_id BIGINT NOT NULL REFERENCES curriculum_item_hours (id) ON DELETE CASCADE,
+    lecturer_count           INTEGER        NOT NULL DEFAULT 1,
+    teaching_format          teaching_format NOT NULL DEFAULT 'TOGETHER',
+    department_id            BIGINT NOT NULL REFERENCES departments (id) ON DELETE CASCADE,
+    course_id                BIGINT REFERENCES courses (id) ON DELETE SET NULL
+);
+
+CREATE TABLE working_curriculum_item_groups
+(
+    working_curriculum_item_id BIGINT NOT NULL REFERENCES working_curriculum_items (id) ON DELETE CASCADE,
+    academic_group_id          BIGINT NOT NULL REFERENCES academic_groups (id) ON DELETE CASCADE,
+    PRIMARY KEY (working_curriculum_item_id, academic_group_id)
+);
+
+-- A "combined" working curriculum item bundles several working_curriculum_items that relate to
+-- the same course, semester, and hour type (e.g. groups from different degree programmes attending one
+-- shared lecture), so a single lecturer_workloads assignment can cover all of them at once.
+CREATE TABLE combined_working_curriculum_items
+(
+    id BIGSERIAL PRIMARY KEY
+);
+
+CREATE TABLE combined_working_curriculum_item_members
+(
+    combined_working_curriculum_item_id BIGINT NOT NULL REFERENCES combined_working_curriculum_items (id) ON DELETE CASCADE,
+    working_curriculum_item_id          BIGINT NOT NULL REFERENCES working_curriculum_items (id) ON DELETE CASCADE,
+    PRIMARY KEY (combined_working_curriculum_item_id, working_curriculum_item_id)
+);
+
+-- ============================ Infrastructure: Rooms ============================
+
+CREATE TYPE room_kind AS ENUM ('LECTURE_HALL', 'COMPUTER_LAB', 'SEMINAR_ROOM');
+
+CREATE TABLE rooms
+(
+    id          BIGSERIAL PRIMARY KEY,
+    building_id BIGINT REFERENCES buildings (id) ON DELETE SET NULL,
+    number      VARCHAR(32) COLLATE ukrainian NOT NULL,
+    name        VARCHAR(96) COLLATE ukrainian,
+    capacity    INTEGER,
+    kind        room_kind,
+    faculty_id  BIGINT REFERENCES faculties (id) ON DELETE SET NULL
+);
+
+-- A named, reusable set of rooms — "Комп'ютерні класи (2 корпус)", "Спортивні зали", "Потокові
+-- аудиторії ФПМІ". Its purpose is reuse: the same handful of rooms is eligible for dozens of
+-- workloads, and naming that set once is better than re-picking the rooms every time.
+--
+-- Modelled on combined_groups, which does the same job for academic groups, down to the optional
+-- `purpose` note explaining what the set is for.
+--
+-- A group may be scoped, so that it is only offered where it makes sense:
+--
+--   both NULL     university-wide — any workload may use it;
+--   faculty_id    only workloads of that faculty's departments;
+--   department_id only that one department's workloads.
+--
+-- The two are mutually exclusive rather than combinable: a department already determines its
+-- faculty, so setting both could only ever be redundant or contradictory. Note the rooms in a
+-- group are *not* constrained by its scope — a department's group routinely contains rooms owned
+-- by the faculty, or by nobody; the scope says who may reach for the group, not what is in it.
+CREATE TABLE room_groups
+(
+    id            BIGSERIAL PRIMARY KEY,
+    name          VARCHAR(64)  COLLATE ukrainian NOT NULL,
+    purpose       VARCHAR(200) COLLATE ukrainian,
+    -- ON DELETE CASCADE for the same reason as class_start_time_sets.faculty_id: a group that
+    -- exists *for* one faculty or department is meaningless once its owner is gone. Nothing is lost
+    -- beyond the group itself — lecturer_workload_room_groups only loses the link, and the rooms,
+    -- which are physical and shared, are untouched.
+    faculty_id    BIGINT REFERENCES faculties (id)   ON DELETE CASCADE,
+    department_id BIGINT REFERENCES departments (id) ON DELETE CASCADE,
+    CONSTRAINT room_groups_scope_check CHECK (
+        faculty_id IS NULL OR department_id IS NULL
+    )
+);
+
+-- Unique within its scope, so a faculty and one of its departments can each keep a group called
+-- "Комп'ютерні класи" without one blocking the other. COALESCE rather than NULLS NOT DISTINCT,
+-- matching class_start_time_sets_unique_name and permissions_unique_grant.
+CREATE UNIQUE INDEX room_groups_unique_name
+    ON room_groups (name, COALESCE(faculty_id, 0), COALESCE(department_id, 0));
+
+CREATE INDEX room_groups_faculty_idx    ON room_groups (faculty_id)    WHERE faculty_id IS NOT NULL;
+CREATE INDEX room_groups_department_idx ON room_groups (department_id) WHERE department_id IS NOT NULL;
+
+CREATE TABLE room_group_rooms
+(
+    room_group_id BIGINT NOT NULL REFERENCES room_groups (id) ON DELETE CASCADE,
+    room_id       BIGINT NOT NULL REFERENCES rooms (id) ON DELETE CASCADE,
+    PRIMARY KEY (room_group_id, room_id)
+);
+
+-- ============================ Infrastructure: Abstract rooms ============================
+--
+-- A place a class is held that the timetable does *not* have to keep to itself. Physical education
+-- is the case that forces it: «спортивні зали» is one line on the schedule, and the groups of half
+-- a faculty are in it at the same hour without that being a clash at all.
+--
+-- Recording that as a rooms row would be a lie the scheduler believes. Every consumer of `rooms`
+-- is built on one room holding one class at a time — the conflict test in the generator, the
+-- occupancy drawn on «Призначення аудиторій», timetableEntryConnection(roomIds:), and
+-- room_timetable_constraints. A boolean column there would leave every one of those quietly wrong
+-- until it was taught to check the flag. A table of its own instead, which nothing that reasons
+-- about room exclusivity reads.
+--
+-- What is still true of an abstract room:
+--
+--   * it may belong to a building — a спортивний комплекс has an address — and then the journey
+--     to it is that building's, straight out of building_travel_times, exactly as for a room;
+--   * or it may not, and then there is no address to measure from, so the journey is one fixed
+--     figure from anywhere: the `abstract_room_travel_time_minutes` global property, seeded at 60
+--     and editable by an administrator like every other institutional figure in that table;
+--   * it may declare a capacity, which — unlike a room's — is a ceiling on the *total* students of
+--     the classes sharing it in one slot, not on the size of any one class. NULL means no ceiling,
+--     which is the ordinary case: «дистанційно» holds everybody.
+--
+-- Scoped the way rooms and room_groups are: faculty_id set means only that faculty's workloads may
+-- reach for it, NULL means university-wide — which is what physical education needs, one pool of
+-- halls serving every faculty.
+CREATE TABLE abstract_rooms
+(
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(96)  COLLATE ukrainian NOT NULL,
+    -- An optional note on what the entry is for, as room_groups.purpose and combined_groups carry.
+    purpose     VARCHAR(200) COLLATE ukrainian,
+    -- NULL = attached to no building, which is the case the constant travel time above exists for.
+    -- ON DELETE SET NULL rather than CASCADE, matching rooms.building_id: deleting a корпус should
+    -- not delete the places, and a row with no building is already a state this table defines, so
+    -- what is left behind still means something exact.
+    building_id BIGINT REFERENCES buildings (id) ON DELETE SET NULL,
+    -- NULL = university-wide. ON DELETE CASCADE rather than the SET NULL rooms.faculty_id uses: a
+    -- room outlives its faculty because it is a physical thing, an abstract room that exists *for*
+    -- one faculty does not. Widening it instead would silently promote a private entry into a
+    -- university-wide one, and — where a university-wide row already carries the same name — make
+    -- deleting the faculty fail on the index below. Same reasoning as room_groups.faculty_id.
+    faculty_id  BIGINT REFERENCES faculties (id) ON DELETE CASCADE,
+    -- Read by the timetable generator, which sums the groups of every class placed in this
+    -- abstract room in the same (day, start time, week parity) and refuses the placement that
+    -- would carry the total past this. Zero is rejected rather than read as "nothing may be
+    -- scheduled here": not assigning the abstract room already says that, and unambiguously.
+    capacity    INTEGER CHECK (capacity > 0)
+);
+
+-- Unique within its scope, so a faculty may keep a «Спортивні зали» of its own beside the
+-- university-wide one. COALESCE rather than NULLS NOT DISTINCT, matching room_groups_unique_name.
+CREATE UNIQUE INDEX abstract_rooms_unique_name
+    ON abstract_rooms (name, COALESCE(faculty_id, 0));
+
+CREATE INDEX abstract_rooms_faculty_idx ON abstract_rooms (faculty_id) WHERE faculty_id IS NOT NULL;
+
+-- ============================ Infrastructure: Class start times ============================
+--
+-- Not every kind of class runs on the same bells. Physical education, for instance, usually starts
+-- on its own grid so students have time to reach a sports hall and back; an evening or part-time
+-- programme may shift the whole day later. So the start times are grouped into *named sets*, and a
+-- timetable entry picks a time out of one of them.
+--
+-- Exactly one set is the default: the one that applies wherever nothing more specific does. A set
+-- may instead be scoped to a single faculty, which restricts it to that faculty — and such a set
+-- can never be the default, because a default is by definition university-wide.
+
+CREATE TABLE class_start_time_sets
+(
+    id         BIGSERIAL PRIMARY KEY,
+    name       VARCHAR(120) COLLATE ukrainian NOT NULL,
+    -- The university-wide set used when nothing more specific applies. At most one row in the whole
+    -- table may have this set — see class_start_time_sets_single_default below.
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    -- NULL = available to every faculty; set = usable only in that faculty's timetables.
+    --
+    -- ON DELETE CASCADE rather than the SET NULL that rooms.faculty_id and courses.faculty_id use:
+    -- a room outlives its faculty because it is a physical thing, but a set that exists *for* one
+    -- faculty has no meaning once that faculty is gone. Widening it instead would silently promote
+    -- a private grid to a university-wide one, and — where a university-wide set already carries
+    -- the same name — make deleting the faculty fail on the name index below.
+    faculty_id BIGINT REFERENCES faculties (id) ON DELETE CASCADE,
+    -- Scoping and defaulting are mutually exclusive: "the default" means "for the whole university".
+    CONSTRAINT class_start_time_sets_default_scope_check CHECK (
+        NOT (is_default AND faculty_id IS NOT NULL)
+    )
+);
+
+-- At most one default across the whole table. A *partial* unique index is what expresses that: it
+-- only indexes the rows where is_default is true, so they collide with each other while the
+-- non-default rows are left alone. A plain UNIQUE (is_default) would wrongly allow just one
+-- non-default set as well.
+--
+-- The index is checked per statement, not deferred to commit, so moving the default has to clear
+-- the old row before (or in the same statement as) setting the new one:
+--     UPDATE class_start_time_sets SET is_default = (id = :newId) WHERE is_default OR id = :newId;
+-- Inserting a new default and only then clearing the old one fails, even inside one transaction.
+CREATE UNIQUE INDEX class_start_time_sets_single_default
+    ON class_start_time_sets (is_default) WHERE is_default;
+
+-- Names are unique within their scope, so two faculties can each keep their own "Фізичне
+-- виховання" while the university-wide sets stay distinguishable from one another. COALESCE
+-- rather than NULLS NOT DISTINCT, matching permissions_unique_grant below.
+CREATE UNIQUE INDEX class_start_time_sets_unique_name
+    ON class_start_time_sets (name, COALESCE(faculty_id, 0));
+
+CREATE INDEX class_start_time_sets_faculty_idx
+    ON class_start_time_sets (faculty_id) WHERE faculty_id IS NOT NULL;
+
+-- Stores only the possible start times a class can begin at; the end of a class is derived from
+-- the workload's duration_hours and the academic_hour_duration_minutes global property.
+--
+-- ordinal is unique *within a set* rather than globally, so every set numbers its own periods
+-- 1..N independently — "друга пара" of the PE set is a different row from "друга пара" of the
+-- main one, and both are legitimately number 2.
+CREATE TABLE class_start_times
+(
+    id                      BIGSERIAL PRIMARY KEY,
+    class_start_time_set_id BIGINT      NOT NULL REFERENCES class_start_time_sets (id) ON DELETE CASCADE,
+    ordinal                 INTEGER     NOT NULL,
+    start_time              VARCHAR(8)  NOT NULL,
+    UNIQUE (class_start_time_set_id, ordinal),
+    -- A set never lists the same clock time twice, whatever ordinal it is given.
+    UNIQUE (class_start_time_set_id, start_time)
+);
+
+-- ============================ Workload (class requirements) & timetable ============================
+
+CREATE TABLE lecturer_workloads
+(
+    id                                   BIGSERIAL PRIMARY KEY,
+    -- Exactly one of these two is set: either a single working_curriculum_item, or a
+    -- combined_working_curriculum_item for lecturers who simultaneously teach several
+    -- working_curriculum_items (e.g. groups from different degree programmes) at once.
+    working_curriculum_item_id          BIGINT REFERENCES working_curriculum_items (id) ON DELETE CASCADE,
+    combined_working_curriculum_item_id BIGINT REFERENCES combined_working_curriculum_items (id) ON DELETE CASCADE,
+    -- Duration of each class for this workload, in academic hours (1 lesson = 1-4 academic hours).
+    duration_hours                      INTEGER NOT NULL DEFAULT 2 CHECK (duration_hours BETWEEN 1 AND 4),
+    -- Which grid of start times this workload's classes are scheduled on. Carried per workload
+    -- rather than per timetable entry because it is a property of the *class*, not of one of its
+    -- weekly occurrences: physical education runs on its own bells for every one of its classes.
+    -- timetable_entries.class_start_time_id must therefore point at a time belonging to this set.
+    --
+    -- ON DELETE RESTRICT: a set in use cannot simply vanish. CASCADE would delete the workloads
+    -- scheduled on it — losing an entire discipline's assignment because someone tidied up a list
+    -- of bells — and the column is NOT NULL, so SET NULL is not available either.
+    class_start_time_set_id             BIGINT  NOT NULL REFERENCES class_start_time_sets (id) ON DELETE RESTRICT,
+    CONSTRAINT lecturer_workloads_target_check CHECK (
+        (working_curriculum_item_id IS NOT NULL) <> (combined_working_curriculum_item_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE lecturer_workload_lecturers
+(
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    lecturer_id           BIGINT NOT NULL REFERENCES lecturers (id) ON DELETE CASCADE,
+    PRIMARY KEY (lecturer_workload_id, lecturer_id)
+);
+
+CREATE TABLE lecturer_workload_academic_groups
+(
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    academic_group_id    BIGINT NOT NULL REFERENCES academic_groups (id) ON DELETE CASCADE,
+    PRIMARY KEY (lecturer_workload_id, academic_group_id)
+);
+
+CREATE TABLE lecturer_workload_combined_groups
+(
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    combined_group_id    BIGINT NOT NULL REFERENCES combined_groups (id) ON DELETE CASCADE,
+    PRIMARY KEY (lecturer_workload_id, combined_group_id)
+);
+
+-- ------------------------------------------------------------------ where the classes are held
+--
+-- Three answers to "where is this held?", and they are alternatives:
+--
+--   a room            lecturer_workload_rooms ∪ lecturer_workload_room_groups, empty = anywhere;
+--   an abstract room  a lecturer_workload_abstract_rooms row — at most one, and shared with the
+--                     other classes sitting in it that hour;
+--   online            a lecturer_workload_online_classes row, and no place at all.
+--
+-- All three hang off lecturer_workloads rather than sitting on it, so nothing enforces that only
+-- one of them is used: a CHECK cannot see across into another table. That is the line drawn
+-- everywhere else here — the database guarantees what is structural and leaves the cross-table
+-- rules to the client, which offers the three as one choice and clears the other two when one is
+-- picked.
+--
+-- The four tables that follow are those three answers, in that order.
+
+-- Which rooms this workload's classes may be held in, said two ways: individually named rooms, and
+-- whole reusable room groups. Both exist because both are natural — a lecture that must happen in
+-- the one hall large enough for it names that hall directly, while a lab that can run in any
+-- computer class points at the group and stays correct when a room is later added to it.
+--
+-- The eligible rooms are the **union** of the two lists, and an empty union means *unrestricted*:
+-- a workload that names neither may be scheduled anywhere, which is the right default for the many
+-- ordinary classes with no particular requirement. Restricting is opt-in.
+--
+-- Nothing here forces timetable_entries.room_id to fall within that union. It is a condition two
+-- joins away (and expands through room_group_rooms), so it belongs to the scheduler, alongside the
+-- matching rule for class start times — see the note on timetable_entries below.
+CREATE TABLE lecturer_workload_rooms
+(
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    room_id              BIGINT NOT NULL REFERENCES rooms (id) ON DELETE CASCADE,
+    PRIMARY KEY (lecturer_workload_id, room_id)
+);
+
+CREATE TABLE lecturer_workload_room_groups
+(
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    room_group_id        BIGINT NOT NULL REFERENCES room_groups (id) ON DELETE CASCADE,
+    PRIMARY KEY (lecturer_workload_id, room_group_id)
+);
+
+-- The one abstract room this workload's classes are held in, when they are held in one.
+--
+-- Written as a table rather than a column on lecturer_workloads so that the workload row carries
+-- no knowledge of it, matching how rooms and room groups are already attached. The limit — no more
+-- than one abstract room per class — survives the move intact, and is the primary key: keying on
+-- lecturer_workload_id *alone* is exactly the statement "at most one row per workload". Contrast
+-- lecturer_workload_rooms above, whose PRIMARY KEY (workload, room) deliberately lets a workload
+-- name many. Nothing stops the same abstract room appearing against any number of workloads, which
+-- is the whole point of one: they sit in it together.
+--
+-- ON DELETE CASCADE on both sides. Losing the workload takes the assignment with it; losing the
+-- abstract room un-assigns every class that named it, leaving the workloads themselves unrestricted
+-- again — the same thing deleting a room does through lecturer_workload_rooms.
+CREATE TABLE lecturer_workload_abstract_rooms
+(
+    lecturer_workload_id BIGINT PRIMARY KEY REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    abstract_room_id     BIGINT NOT NULL   REFERENCES abstract_rooms (id)     ON DELETE CASCADE
+);
+
+-- The primary key indexes the workload side only, and the question the capacity ceiling asks runs
+-- the other way — "every class placed in this abstract room" — so that direction gets an index of
+-- its own. It is the one read the generator makes per candidate placement.
+CREATE INDEX lecturer_workload_abstract_rooms_abstract_room_idx
+    ON lecturer_workload_abstract_rooms (abstract_room_id);
+
+CREATE TYPE online_class_platform AS ENUM (
+    'ZOOM',
+    'MICROSOFT_TEAMS',
+    'GOOGLE_MEET',
+    'MOODLE',
+    'SKYPE',
+    'WEBEX',
+    'BIGBLUEBUTTON',
+    'OTHER'
+);
+
+-- A workload held online instead of in a place. At most one row per workload — which is what the
+-- primary key below says — and the row's *presence* is the fact; the columns only say how to
+-- attend.
+--
+-- A table rather than a boolean on lecturer_workloads because there is something to record beyond
+-- yes/no: «Мій кабінет» and the printed «Розклад занять» both have to tell a student where to
+-- go, and a URL on lecturer_workloads would be a column that is NULL for very nearly every row.
+--
+-- Keyed by lecturer_workload_id itself, with no surrogate id beside it. That is the honest key —
+-- a second column would be a second way to name a row that the foreign key already names uniquely,
+-- and a UNIQUE constraint would then be carrying the real rule while the primary key carried none.
+-- It does mean this table is *not* addressable by the entity framework as it stands, which assumes
+-- every entity has a `Long id` (see the service README, «global_properties» — outside the entity
+-- framework); teaching the framework to take an entity's key column from its metadata rather than
+-- from that assumption is what makes this row reachable, and is a change to
+-- org.lnu.timetable.framework, not to this file.
+CREATE TABLE lecturer_workload_online_classes
+(
+    -- ON DELETE CASCADE: the row describes one workload and means nothing without it.
+    lecturer_workload_id BIGINT PRIMARY KEY REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    -- NULL = held online, platform unstated. OTHER is for one that is stated but not on this list,
+    -- and `note` is where it gets named.
+    --
+    -- Declaration order is what ORDER BY on this column sorts by, so the values run from the ones
+    -- actually in use here to the ones that only might be, and OTHER is last on purpose. Adding a
+    -- value to a populated database is ALTER TYPE … ADD VALUE … BEFORE 'OTHER' rather than a plain
+    -- append, or the new platform sorts behind it — the same trap hour_type documents.
+    platform             online_class_platform,
+    -- Not collated, for the same reason the e-mail, phone and website columns are not: an
+    -- identifier nobody reads in alphabetical order.
+    meeting_url          VARCHAR(512),
+    note                 VARCHAR(200) COLLATE ukrainian
+);
+
+-- Lecturer<->student pairings for a workload whose working curriculum item is taught
+-- INDIVIDUALLY (e.g. coursework consultations): instead of assigning academic groups, each
+-- student is paired with the lecturer supervising them.
+--
+-- Unlike the join tables above this needs its own surrogate id: the two foreign keys are only
+-- meaningful together, so it is written as a nested child list on LecturerWorkload's mutations,
+-- and that reconciliation matches and deletes child rows by id.
+CREATE TABLE lecturer_workload_students
+(
+    id                   BIGSERIAL PRIMARY KEY,
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    lecturer_id          BIGINT NOT NULL REFERENCES lecturers (id) ON DELETE CASCADE,
+    student_id           BIGINT NOT NULL REFERENCES students (id) ON DELETE CASCADE,
+    -- Within one workload a student has exactly one supervising lecturer.
+    UNIQUE (lecturer_workload_id, student_id)
+);
+
+-- Lecturers who *could* deliver a workload, each with how desirable that assignment is: 100 is
+-- ideal, 1 is a last resort. Input for automatic workload generation — the generator picks from
+-- these rather than from every lecturer of the department, and prefers higher scores.
+--
+-- Distinct from lecturer_workload_lecturers, which records who was actually assigned: a workload
+-- may list many candidates and end up with one of them (or, before generation runs, none).
+CREATE TABLE lecturer_workload_candidates
+(
+    id                   BIGSERIAL PRIMARY KEY,
+    lecturer_workload_id BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    lecturer_id          BIGINT NOT NULL REFERENCES lecturers (id) ON DELETE CASCADE,
+    desirability         INTEGER NOT NULL CHECK (desirability BETWEEN 1 AND 100),
+    -- A lecturer is a candidate for a given workload at most once.
+    UNIQUE (lecturer_workload_id, lecturer_id)
+);
+
+-- Per-candidate student-count limits, meaningful only when the underlying working curriculum item
+-- is taught INDIVIDUALLY (coursework consultations and the like), where the workload is measured
+-- in students rather than in groups. Shaped like lecturer_workload_constraints: one row per limit
+-- actually set, rather than two mostly-NULL columns on every candidate.
+--
+--   MIN_STUDENTS  the *desired* number of students for this lecturer — generation tries to give
+--                 them at least this many.
+--   MAX_STUDENTS  the hard ceiling. Students beyond the desired number are handed out among the
+--                 candidates that still have headroom, in order of desirability, up to this value.
+CREATE TYPE lecturer_workload_candidate_constraint_type AS ENUM ('MIN_STUDENTS', 'MAX_STUDENTS');
+
+CREATE TABLE lecturer_workload_candidate_constraints
+(
+    id                             BIGSERIAL PRIMARY KEY,
+    lecturer_workload_candidate_id BIGINT NOT NULL
+        REFERENCES lecturer_workload_candidates (id) ON DELETE CASCADE,
+    constraint_type                lecturer_workload_candidate_constraint_type NOT NULL,
+    value                          INTEGER NOT NULL CHECK (value >= 0),
+    -- A limit is set at most once per candidate.
+    UNIQUE (lecturer_workload_candidate_id, constraint_type)
+);
+
+CREATE TYPE week_parity AS ENUM ('WEEKLY', 'NUMERATOR', 'DENOMINATOR');
+
+CREATE TABLE timetable_entries
+(
+    id           BIGSERIAL PRIMARY KEY,
+    day_of_week  INTEGER     NOT NULL,
+    week_parity  week_parity NOT NULL,
+    workload_id  BIGINT NOT NULL REFERENCES lecturer_workloads (id) ON DELETE CASCADE,
+    -- The chosen time carries its set with it (class_start_times.class_start_time_set_id), so no
+    -- separate set column is stored here — one would only be able to disagree with this one.
+    -- Whether that set is *allowed* for the entry's faculty is a question about
+    -- class_start_time_sets.faculty_id and the workload's groups, two joins away, so it is enforced
+    -- in the application rather than by a constraint here.
+    class_start_time_id BIGINT NOT NULL REFERENCES class_start_times (id) ON DELETE CASCADE,
+    -- Likewise: the room must be one the workload allows — the union of lecturer_workload_rooms and
+    -- the rooms of its lecturer_workload_room_groups, or any room at all when both are empty. That
+    -- is a set-membership test across two join tables, so the scheduler enforces it, not a CHECK.
+    --
+    -- NULL when the class occupies no room: its workload names an abstract room, which is shared
+    -- with whatever else is in it at that hour and so has nothing to allocate, or it is held
+    -- online. Which of the two, and which abstract room, is read from the workload rather than
+    -- copied here — a second copy could only ever disagree with the first, the same reason the
+    -- class start time set is not repeated on this row either.
+    --
+    -- ON DELETE CASCADE survives that: deleting a room still deletes the classes scheduled in it,
+    -- rather than leaving entries whose NULL room_id would now read as "abstract room or online".
+    room_id      BIGINT REFERENCES rooms (id) ON DELETE CASCADE
+);
+
+-- ============================ Scheduling constraints ============================
+--
+-- When and how densely a lecturer, an academic group or a room may be given classes. These do not
+-- describe a timetable; they restrict the ones the scheduler is allowed to build, and are checked
+-- against a candidate timetable_entries row rather than stored on it.
+--
+-- The eight rules the faculty asks for are four kinds of restriction, each of which either applies
+-- to every day or to one named day — so `day_of_week NULL` means "every day" and a value means
+-- "that day only".
+--
+-- The payload is a single `constraint_value` string whose meaning depends on `constraint_type`,
+-- the same arrangement global_properties uses (value always text, type says how to read it):
+--
+--   constraint_type      constraint_value    example  meaning
+--   -------------------  ------------------  -------  --------------------------------------------
+--   MAX_CLASSES_PER_DAY  N                   '3'      at most N classes
+--   NOT_BEFORE           HH:MM               '12:30'  nothing may *start* before this
+--   NOT_AFTER            HH:MM               '17:00'  nothing may *end* after this
+--   UNAVAILABLE          HH:MM-HH:MM         '13:10-14:00'  nothing may overlap [from, to)
+--
+-- Each form is pinned by timetable_constraints_value_check on every table, so the column can only
+-- ever hold a string the matching type knows how to read: a count is canonical decimal with no
+-- leading zeros or sign, times are zero-padded 24-hour, and a window's two halves are separated by
+-- one '-' and run forwards. Reading it back is `constraint_value::int` for a count,
+-- `left(constraint_value, 5)` and `right(constraint_value, 5)` for a window's ends — and because
+-- the times are zero-padded, plain string comparison against class_start_times.start_time
+-- (VARCHAR(8), but only ever HH:MM) is chronological comparison, with no cast either way.
+--
+-- day_of_week is deliberately *not* folded into the string: it selects which rows apply and has to
+-- stay a column the scheduler can filter and index on.
+--
+-- The last three types are one idea — a forbidden interval — and a scheduler is expected to
+-- normalise them into intervals: NOT_BEFORE is [00:00, from), NOT_AFTER is [to, 24:00), and
+-- UNAVAILABLE is the closed-open span between the two. They are kept as separate types anyway
+-- because the intent is what the user typed and what an editing UI has to show back; collapsing
+-- them would turn "закінчувати о 17:00" into "не займати 17:00–24:00" the next time the row is read.
+--
+-- **More specific wins.** A day-specific row overrides the every-day row of the same type for that
+-- day rather than adding to it: NOT_BEFORE 12:30 every day together with NOT_BEFORE 09:00 on
+-- Monday means Monday starts at 09:00 and the rest of the week at 12:30. Without that rule the two
+-- could only ever contradict each other, since a lecturer who wants a later start on one day has no
+-- way to say so. UNAVAILABLE is the exception: its windows accumulate, because several disjoint
+-- gaps in one day are a normal thing to want and none of them contradicts another. The unique
+-- indexes on each table below say exactly this — one row per (subject, type, day) for the three
+-- single-valued types, and only exact duplicates rejected for windows.
+--
+-- Evaluating the time rules needs the *end* of a class, which is not stored anywhere: it is
+-- class_start_times.start_time + lecturer_workloads.duration_hours × the
+-- academic_hour_duration_minutes global property. Only NOT_BEFORE can be answered from the start
+-- time alone.
+--
+-- Counting for MAX_CLASSES_PER_DAY is per *calendar week*, not per row: an entry with week_parity
+-- WEEKLY falls in both weeks, NUMERATOR and DENOMINATOR in one each, so the cap has to hold for
+-- (WEEKLY + NUMERATOR) and for (WEEKLY + DENOMINATOR) separately. Counting all three together
+-- would reject a legal timetable that merely alternates two classes in one slot.
+--
+-- Nothing here is a preference: every row is a hard restriction. Soft constraints would need a
+-- weight alongside, in the shape of lecturer_workload_candidates.desirability, and are deliberately
+-- left out until there is a scheduler that can trade them off.
+--
+-- One table per subject rather than one shared table with a nullable lecturer/group/room triple:
+-- each subject then has a plain NOT NULL foreign key instead of an "exactly one of three is set"
+-- CHECK, the unique indexes lose their COALESCE over the subject columns, and each table is
+-- indexed and queried on its own. The cost is that the value rule below is written out three
+-- times — the enum is shared, but adding a constraint type means touching all three tables.
+
+CREATE TYPE timetable_constraint_type AS ENUM (
+    'MAX_CLASSES_PER_DAY',
+    'NOT_BEFORE',
+    'NOT_AFTER',
+    'UNAVAILABLE'
+);
+
+-- ------------------------------------------------------------------ lecturers
+
+CREATE TABLE lecturer_timetable_constraints
+(
+    id               BIGSERIAL PRIMARY KEY,
+    lecturer_id      BIGINT NOT NULL REFERENCES lecturers (id) ON DELETE CASCADE,
+    constraint_type  timetable_constraint_type NOT NULL,
+    -- NULL = every day. Otherwise 1..7 with Monday = 1, the same convention as
+    -- timetable_entries.day_of_week.
+    day_of_week      INTEGER,
+    -- Serialized per constraint_type — see the table of forms above.
+    constraint_value VARCHAR(32) NOT NULL,
+
+    CONSTRAINT lecturer_timetable_constraints_day_check CHECK (
+        day_of_week IS NULL OR day_of_week BETWEEN 1 AND 7
+    ),
+    -- The value is only ever a string the matching type can read. '0' is a meaningful count —
+    -- "no classes at all on Friday" — so it is allowed, while '007', '-1' and '9:00' are not, and
+    -- an UNAVAILABLE window must run forwards (equal ends would be an empty window, a row that
+    -- restricts nothing).
+    CONSTRAINT lecturer_timetable_constraints_value_check CHECK (
+        CASE constraint_type
+            WHEN 'MAX_CLASSES_PER_DAY' THEN
+                constraint_value ~ '^(0|[1-9][0-9]{0,2})$'
+            WHEN 'NOT_BEFORE' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            WHEN 'NOT_AFTER' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            WHEN 'UNAVAILABLE' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$'
+                AND left(constraint_value, 5) < right(constraint_value, 5)
+        END
+    )
+);
+
+-- The three single-valued types are set at most once per lecturer and day — re-setting one updates
+-- the existing row, as lecturer_workload_constraints does. COALESCE rather than NULLS NOT DISTINCT
+-- so that the every-day row (day_of_week NULL) collides with another every-day row of the same
+-- type, matching room_groups_unique_name and permissions_unique_grant.
+CREATE UNIQUE INDEX lecturer_timetable_constraints_unique_single
+    ON lecturer_timetable_constraints (lecturer_id, constraint_type, COALESCE(day_of_week, 0))
+    WHERE constraint_type <> 'UNAVAILABLE';
+
+-- Windows may repeat across a lecturer's days but not within one: the same span entered twice is a
+-- duplicate, not a second restriction.
+CREATE UNIQUE INDEX lecturer_timetable_constraints_unique_window
+    ON lecturer_timetable_constraints (lecturer_id, COALESCE(day_of_week, 0), constraint_value)
+    WHERE constraint_type = 'UNAVAILABLE';
+
+-- Reading every constraint of one lecturer spans both partial indexes above, so it needs one of
+-- its own. Same for the two tables that follow.
+CREATE INDEX lecturer_timetable_constraints_lecturer_idx
+    ON lecturer_timetable_constraints (lecturer_id);
+
+-- ------------------------------------------------------------------ academic groups
+
+CREATE TABLE academic_group_timetable_constraints
+(
+    id                BIGSERIAL PRIMARY KEY,
+    academic_group_id BIGINT NOT NULL REFERENCES academic_groups (id) ON DELETE CASCADE,
+    constraint_type   timetable_constraint_type NOT NULL,
+    day_of_week       INTEGER,
+    constraint_value  VARCHAR(32) NOT NULL,
+
+    CONSTRAINT academic_group_timetable_constraints_day_check CHECK (
+        day_of_week IS NULL OR day_of_week BETWEEN 1 AND 7
+    ),
+    CONSTRAINT academic_group_timetable_constraints_value_check CHECK (
+        CASE constraint_type
+            WHEN 'MAX_CLASSES_PER_DAY' THEN
+                constraint_value ~ '^(0|[1-9][0-9]{0,2})$'
+            WHEN 'NOT_BEFORE' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            WHEN 'NOT_AFTER' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            WHEN 'UNAVAILABLE' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$'
+                AND left(constraint_value, 5) < right(constraint_value, 5)
+        END
+    )
+);
+
+CREATE UNIQUE INDEX academic_group_timetable_constraints_unique_single
+    ON academic_group_timetable_constraints (academic_group_id, constraint_type,
+                                             COALESCE(day_of_week, 0))
+    WHERE constraint_type <> 'UNAVAILABLE';
+
+CREATE UNIQUE INDEX academic_group_timetable_constraints_unique_window
+    ON academic_group_timetable_constraints (academic_group_id, COALESCE(day_of_week, 0),
+                                             constraint_value)
+    WHERE constraint_type = 'UNAVAILABLE';
+
+CREATE INDEX academic_group_timetable_constraints_group_idx
+    ON academic_group_timetable_constraints (academic_group_id);
+
+-- ------------------------------------------------------------------ rooms
+
+CREATE TABLE room_timetable_constraints
+(
+    id               BIGSERIAL PRIMARY KEY,
+    room_id          BIGINT NOT NULL REFERENCES rooms (id) ON DELETE CASCADE,
+    constraint_type  timetable_constraint_type NOT NULL,
+    day_of_week      INTEGER,
+    constraint_value VARCHAR(32) NOT NULL,
+
+    CONSTRAINT room_timetable_constraints_day_check CHECK (
+        day_of_week IS NULL OR day_of_week BETWEEN 1 AND 7
+    ),
+    CONSTRAINT room_timetable_constraints_value_check CHECK (
+        CASE constraint_type
+            WHEN 'MAX_CLASSES_PER_DAY' THEN
+                constraint_value ~ '^(0|[1-9][0-9]{0,2})$'
+            WHEN 'NOT_BEFORE' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            WHEN 'NOT_AFTER' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+            WHEN 'UNAVAILABLE' THEN
+                constraint_value ~ '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$'
+                AND left(constraint_value, 5) < right(constraint_value, 5)
+        END
+    )
+);
+
+CREATE UNIQUE INDEX room_timetable_constraints_unique_single
+    ON room_timetable_constraints (room_id, constraint_type, COALESCE(day_of_week, 0))
+    WHERE constraint_type <> 'UNAVAILABLE';
+
+CREATE UNIQUE INDEX room_timetable_constraints_unique_window
+    ON room_timetable_constraints (room_id, COALESCE(day_of_week, 0), constraint_value)
+    WHERE constraint_type = 'UNAVAILABLE';
+
+CREATE INDEX room_timetable_constraints_room_idx
+    ON room_timetable_constraints (room_id);
+
+-- ============================ Authentication & authorization ============================
+--
+-- Users never self-register: an admin creates an account with a temporary password
+-- (must_change_password = TRUE), and the user is forced to set a real password on first login.
+--
+-- Permissions are entity-scoped: a grant names a resource_type (the securable entity's simple
+-- class name in UPPER_SNAKE_CASE, e.g. 'FACULTY', 'DEPARTMENT', 'WORKING_CURRICULUM_ITEM' — this
+-- mirrors org.lnu.timetable.framework.metadata.EntityMetadata#resourceType, so any entity newly
+-- annotated with @GraphQLEntity automatically becomes a valid grant target with no schema change
+-- here) plus a resource_id, OR the special resource_type 'GLOBAL' (resource_id NULL) for a
+-- university-wide scope. A grant carries an access level (see the access_level type below) that
+-- says what may be done inside that scope, and the scope itself cascades to the resource's
+-- descendants along the edges declared via @PermissionParent/@PermissionJoinParent on the domain
+-- classes (see org.lnu.timetable.security.PermissionService) — this table only stores the grants
+-- themselves, not the cascade rules. The level does not weaken on the way down: EDIT on a
+-- факультет is EDIT on every кафедра, освітня програма, група, план, навантаження and заняття under
+-- it, which is what makes "give the деканат their faculty and nothing else" a single row.
+--
+-- A grant is made either to a single user or to a group (never both); a user can belong to
+-- multiple groups, and a user's effective level on a resource is the *highest* level among their
+-- own grants and their groups' grants on that resource or any of its ancestors.
+
+-- An account may also say *who its owner is* in the domain model: lecturer_id names the викладач
+-- they are, student_id the студент. Both are optional and mutually exclusive — a person is one or
+-- the other, and most accounts (deanery staff, the administrator) are neither, which is why the
+-- rule is a CHECK over two nullable columns rather than a NOT NULL discriminator. It is an
+-- identity, not a role: permissions still come from the grants below, and the link only decides
+-- whose навантаження / навчальний план / розклад «Мій кабінет» shows.
+--
+-- ON DELETE SET NULL rather than CASCADE, deliberately: striking a lecturer off the staff list must
+-- not silently delete their account together with its permission grants and its audit trail in
+-- permissions.granted_by. The account survives, unlinked, for an administrator to deal with.
+
+CREATE TABLE users
+(
+    id                   BIGSERIAL PRIMARY KEY,
+    email                VARCHAR(255) NOT NULL UNIQUE,
+    first_name           VARCHAR(100) NOT NULL,
+    last_name            VARCHAR(100) NOT NULL,
+    password_hash        VARCHAR(255) NOT NULL,
+    must_change_password BOOLEAN      NOT NULL DEFAULT TRUE,
+    is_active            BOOLEAN      NOT NULL DEFAULT TRUE,
+    lecturer_id          BIGINT REFERENCES lecturers (id) ON DELETE SET NULL,
+    student_id           BIGINT REFERENCES students (id) ON DELETE SET NULL,
+    created_at           TIMESTAMP    NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMP    NOT NULL DEFAULT now(),
+    -- A user can be a Lecturer or a Student, or neither — never both.
+    CONSTRAINT users_person_link_check CHECK (lecturer_id IS NULL OR student_id IS NULL)
+);
+
+-- One account per person, in the other direction: two accounts both claiming lecturer 123 would
+-- make "whose timetable is mine?" ambiguous without either of them being wrong on its own. Partial,
+-- so the many accounts linked to nobody do not collide with each other (the house convention for
+-- "unique, treating NULL as a value" is COALESCE(col, 0); here NULL genuinely means "no link", so a
+-- WHERE ... IS NOT NULL predicate is the right shape instead).
+CREATE UNIQUE INDEX users_unique_lecturer ON users (lecturer_id) WHERE lecturer_id IS NOT NULL;
+CREATE UNIQUE INDEX users_unique_student  ON users (student_id)  WHERE student_id IS NOT NULL;
+
+-- `email` is already UNIQUE, but case-sensitively, while every lookup in the service is
+-- `lower(email) = lower(:email)` — an address is not two accounts because somebody capitalised a
+-- letter. Without this, 'A.Petrenko@lnu.edu.ua' and 'a.petrenko@lnu.edu.ua' are two rows the
+-- column constraint permits and no code path can tell apart: the duplicate-check before a new
+-- account sees neither of them, and `login` finds two rows where it expects one. Self-service
+-- registration is the first unauthenticated path that could create the second row, which is what
+-- made this worth stating in the schema rather than in a convention.
+CREATE UNIQUE INDEX users_unique_lower_email ON users (lower(email));
+
+CREATE TABLE groups
+(
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(160) NOT NULL UNIQUE,
+    description VARCHAR(500)
+);
+
+CREATE TABLE user_groups
+(
+    user_id  BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    group_id BIGINT NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, group_id)
+);
+
+CREATE TYPE grantee_type AS ENUM ('USER', 'GROUP');
+
+-- How much a grant lets its holder do. The three values are *ordered* — an enum rather than three
+-- boolean columns precisely so that every check in the service reduces to one comparison,
+-- `level >= <required>`, and so that adding a fourth level later cannot silently mean "and also
+-- everything the other three flags implied".
+--
+--   EDIT   — create and update the resource and everything below it. Cannot delete anything.
+--            This is the everyday level: a методист who maintains навчальні плани and навантаження
+--            but must not be able to remove a кафедра or a група by mis-clicking.
+--   FULL   — everything EDIT allows, plus delete. Deletion cascades in this schema (dropping a
+--            DegreeProgram takes its groups, curriculum items and workloads with it), which is exactly
+--            why it is a separate level and not part of "may modify".
+--   MANAGE — everything FULL allows, plus granting and revoking access to this resource and its
+--            descendants, at any level up to MANAGE itself. This is the delegation level: the
+--            деканат holds MANAGE on the факультет and hands out EDIT/FULL on individual кафедри
+--            without an administrator being involved.
+--
+-- Declaration order is the comparison order in PostgreSQL, so 'EDIT' < 'FULL' < 'MANAGE' holds in
+-- SQL as well as in org.lnu.timetable.security.AccessLevel.
+CREATE TYPE access_level AS ENUM ('EDIT', 'FULL', 'MANAGE');
+
+CREATE TABLE permissions
+(
+    id            BIGSERIAL PRIMARY KEY,
+    grantee_type  grantee_type NOT NULL,
+    user_id       BIGINT REFERENCES users (id) ON DELETE CASCADE,
+    group_id      BIGINT REFERENCES groups (id) ON DELETE CASCADE,
+    -- Entity simple name in UPPER_SNAKE_CASE (e.g. 'FACULTY'), or 'GLOBAL' for university-wide scope.
+    resource_type VARCHAR(64)  NOT NULL,
+    -- NULL only when resource_type = 'GLOBAL'.
+    resource_id   BIGINT,
+    -- What the grantee may do within that scope. There is no DEFAULT on purpose: every writer must
+    -- say which level it means, so a forgotten column cannot quietly hand out delete rights.
+    level         access_level NOT NULL,
+    granted_by    BIGINT REFERENCES users (id) ON DELETE SET NULL,
+    created_at    TIMESTAMP    NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMP    NOT NULL DEFAULT now(),
+    CONSTRAINT permissions_grantee_check CHECK (
+        (grantee_type = 'USER' AND user_id IS NOT NULL AND group_id IS NULL) OR
+        (grantee_type = 'GROUP' AND group_id IS NOT NULL AND user_id IS NULL)
+    ),
+    CONSTRAINT permissions_resource_check CHECK (
+        (resource_type = 'GLOBAL' AND resource_id IS NULL) OR
+        (resource_type <> 'GLOBAL' AND resource_id IS NOT NULL)
+    )
+);
+
+-- A given grantee holds at most one grant per exact resource, and `level` is an attribute of that
+-- one row rather than a second row: re-granting the same scope at a different level is an UPDATE,
+-- so "who can do what here" never has to be read as the max over several rows meaning the same
+-- thing. (COALESCE(col, 0) rather than NULLS NOT DISTINCT so the two GLOBAL rows, which both have
+-- resource_id = NULL, are still treated as duplicates of each other.)
+CREATE UNIQUE INDEX permissions_unique_grant
+    ON permissions (grantee_type, COALESCE(user_id, 0), COALESCE(group_id, 0), resource_type, COALESCE(resource_id, 0));
+
+CREATE INDEX permissions_user_idx ON permissions (user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX permissions_group_idx ON permissions (group_id) WHERE group_id IS NOT NULL;
+CREATE INDEX permissions_resource_idx ON permissions (resource_type, resource_id);
+
+
+-- ============================ Group invitation links ============================
+--
+-- A link that puts whoever follows it into one group. Membership is what carries access — a grant
+-- may name a group, and «Деканат ФПМіІ» holds MANAGE on its факультет — so adding an account to a
+-- group is the act that lets it do anything at all. Doing that one account at a time is right for
+-- handing somebody a кафедра and wrong for the week the data is entered, when twenty volunteers
+-- arrive at once; an invitation is the same act, delegated to the person joining.
+--
+-- Redeeming one inserts a single `user_groups` row for the account already signed in, and nothing
+-- else: it never creates an account, never makes a grant, and never confers the right to invite
+-- anybody further.
+--
+-- **The token is stored as it is, and `account_tokens` stores only a hash.** The difference is what
+-- the two are for. A registration link goes to one address and is spent once, so nobody ever needs
+-- to read it back. An invitation is shared with a room full of people over days, and whoever made
+-- it has to be able to open «Посилання-запрошення» a week later and paste the same link into a
+-- second chat — which a hash cannot answer. So this table holds live bearer credentials, bounded
+-- rather than denied: every row expires (five minutes to thirty days, in the CHECK below), every
+-- row can be deleted the moment it has done its work, and what redeeming one is worth is membership
+-- of one group. It is outside the entity framework, like every other table in this section, and is
+-- read only by callers who may already administer the group.
+CREATE TABLE group_invitations
+(
+    id         BIGSERIAL PRIMARY KEY,
+    group_id   BIGINT      NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    -- 32 bytes from SecureRandom, base64url — 43 characters and no dot, which is what keeps
+    -- FrontendController's `[^.]*` patterns serving the page that carries it.
+    token      VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMP   NOT NULL,
+    -- How many accounts joined through this link. A counter rather than a table of redemptions: who
+    -- is in the group is already `user_groups`, and the only question left is «did anyone use the
+    -- link I sent», which is what is asked before deleting it.
+    join_count INTEGER     NOT NULL DEFAULT 0,
+    -- Survives the account that made it, for the reason `permissions.granted_by` does: who opened a
+    -- door is worth knowing after they have gone.
+    created_by BIGINT REFERENCES users (id) ON DELETE SET NULL,
+    created_at TIMESTAMP   NOT NULL DEFAULT now(),
+    -- The lifetime bounds, in the schema rather than only in the mutation: at least five minutes, at
+    -- most thirty days. Both sides of the comparison must come from the same clock, so the service
+    -- writes `expires_at` as `now() + make_interval(mins => :ttl)` — the database's now(), the same
+    -- value `created_at` defaults to inside that statement. Computing it from the JVM's clock
+    -- instead makes the thirty-day maximum fail whenever the two machines disagree by a millisecond.
+    CONSTRAINT group_invitations_lifetime_check CHECK (
+        expires_at >= created_at + INTERVAL '5 minutes' AND
+        expires_at <= created_at + INTERVAL '30 days'
+    )
+);
+
+-- `token` is UNIQUE, which is how redemption looks a link up. This is the other question: every
+-- invitation of one group, newest first — what «Посилання-запрошення» lists.
+CREATE INDEX group_invitations_group_idx ON group_invitations (group_id, created_at DESC);
+
+
+-- ============================ Self-service registration & password recovery ============================
+--
+-- One-time links, e-mailed to somebody the institution has already entered, and valid for
+-- `app.security.account-token-ttl-minutes` (30). Two things arrive through this table and nothing
+-- else does:
+--
+--   REGISTRATION   — a викладач or a студент whose own row carries an e-mail, and who has no
+--                    account yet, asks for one. The row records which person the link belongs to,
+--                    so the account created at the end of it is linked to them by construction
+--                    rather than by an administrator's later `setUserLink`.
+--   PASSWORD_RESET — an existing account has forgotten its password. The row records the account.
+--
+-- The token itself is never stored. What is stored is its SHA-256, lowercase hex, for the same
+-- reason `users.password_hash` is a hash: a link is a bearer credential for thirty minutes, and a
+-- dump of this table must not be a set of working ones. `token_hash` is the lookup key precisely
+-- because the plaintext is not here to look it up by.
+--
+-- Spent rows are kept (`used_at`) rather than deleted, so a second click on a link that already
+-- worked can say «посилання вже використано» instead of «посилання недійсне» — the difference
+-- between "you have already done this" and "somebody sent you something broken".
+--
+-- `used_at` and `expires_at` therefore carry one fact each, and asking a second link for the same
+-- address does not touch the first's `used_at`: it brings its `expires_at` forward instead, so the
+-- superseded link reads as «термін дії минув, замовте нове» rather than as «ви вже це зробили»,
+-- which would send somebody who has never set a password to a login form to use it.
+CREATE TYPE account_token_purpose AS ENUM ('REGISTRATION', 'PASSWORD_RESET');
+
+CREATE TABLE account_tokens
+(
+    id          BIGSERIAL PRIMARY KEY,
+    purpose     account_token_purpose NOT NULL,
+    -- SHA-256 of the token carried in the link, lowercase hex.
+    token_hash  CHAR(64)              NOT NULL UNIQUE,
+    -- The address the link was sent to. Kept so that a token cannot be redeemed against a person
+    -- whose e-mail has since been changed to somebody else's, and so the per-address cooldown in
+    -- AccountTokenRepository has something to count.
+    email       VARCHAR(255)          NOT NULL,
+    -- Exactly one of the three is set, and which one follows from `purpose` — see the CHECK below.
+    lecturer_id BIGINT REFERENCES lecturers (id) ON DELETE CASCADE,
+    student_id  BIGINT REFERENCES students (id) ON DELETE CASCADE,
+    user_id     BIGINT REFERENCES users (id) ON DELETE CASCADE,
+    expires_at  TIMESTAMP             NOT NULL,
+    used_at     TIMESTAMP,
+    created_at  TIMESTAMP             NOT NULL DEFAULT now(),
+    CONSTRAINT account_tokens_subject_check CHECK (
+        (purpose = 'REGISTRATION' AND user_id IS NULL
+            AND ((lecturer_id IS NULL) <> (student_id IS NULL))) OR
+        (purpose = 'PASSWORD_RESET' AND user_id IS NOT NULL
+            AND lecturer_id IS NULL AND student_id IS NULL)
+    )
+);
+
+-- What the cooldown and the "invalidate what is outstanding" sweep both read: every live link for
+-- one address and purpose, newest first.
+CREATE INDEX account_tokens_recent_idx ON account_tokens (lower(email), purpose, created_at DESC);
+
+
+-- ============================ Flyway's own bookkeeping ============================
+--
+-- Flyway creates this table itself the first time it runs, so it would be reasonable to expect it
+-- not to belong in a hand-written schema. It belongs here for one concrete reason: data.sql is a
+-- data-only pg_dump of a real database, and that database had the table, so the dump carries a row
+-- per migration that had run there — thirteen of them as it stands, the baseline plus V1..V12, and
+-- one more with every re-dump that follows a migration. Loading data.sql into a schema this file has just
+-- created therefore needs the table to already exist — without it, reset_db.sh gets as far as the
+-- дамп's flyway block and fails there.
+--
+-- The definition below is Flyway's own, column for column, so Flyway adopts this table rather than
+-- finding one it does not recognise. Column order matters as much as the types do: data.sql's
+-- INSERTs name their columns, but pg_dump wrote that list in attnum order and a future re-dump
+-- will do the same.
+--
+-- What this changes about a freshly reset database. Flyway baselines a schema only when the history
+-- table is *missing*; now it is present and populated, so spring.flyway.baseline-on-migrate never
+-- fires, and the migrations data.sql already records as applied (V1..V12) are not run a second time.
+-- That is the right outcome — the dump was taken after they ran, so their effects are in the data
+-- already — but it does mean this table is now part of what data.sql restores, and a migration
+-- added after the last dump is the only kind that still runs on a reset. Today there is none: the
+-- dump was taken after V12, so a reset applies nothing at all and the migrations exist for the
+-- databases the dump does not reach.
+CREATE TABLE flyway_schema_history
+(
+    installed_rank INTEGER                NOT NULL,
+    version        VARCHAR(50),
+    description    VARCHAR(200)           NOT NULL,
+    type           VARCHAR(20)            NOT NULL,
+    script         VARCHAR(1000)          NOT NULL,
+    -- Nullable, and the baseline row in data.sql is exactly the case: a baseline marks a position
+    -- rather than a file, so there is nothing to have taken a checksum of.
+    checksum       INTEGER,
+    installed_by   VARCHAR(100)           NOT NULL,
+    installed_on   TIMESTAMP DEFAULT now() NOT NULL,
+    execution_time INTEGER                NOT NULL,
+    success        BOOLEAN                NOT NULL,
+    CONSTRAINT flyway_schema_history_pk PRIMARY KEY (installed_rank)
+);
+
+CREATE INDEX flyway_schema_history_s_idx ON flyway_schema_history (success);

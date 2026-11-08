@@ -1,0 +1,122 @@
+{
+ "agh-ggis-spr17": {
+  "courses": 272,
+  "configs": 272,
+  "subparts": 1224,
+  "classes": 1852,
+  "rooms": 44,
+  "class_room_rows": 12377,
+  "classes_with_parent": 353,
+  "max_parent_chain": 2,
+  "classes_without_rooms": 152,
+  "mean_rooms_per_class": 6.68
+ },
+ "bet-fal17": {
+  "courses": 353,
+  "configs": 398,
+  "subparts": 633,
+  "classes": 983,
+  "rooms": 62,
+  "class_room_rows": 21971,
+  "classes_with_parent": 331,
+  "max_parent_chain": 4,
+  "classes_without_rooms": 119,
+  "mean_rooms_per_class": 22.35
+ },
+ "iku-fal17": {
+  "courses": 1206,
+  "configs": 1211,
+  "subparts": 1636,
+  "classes": 2641,
+  "rooms": 214,
+  "class_room_rows": 73681,
+  "classes_with_parent": 899,
+  "max_parent_chain": 2,
+  "classes_without_rooms": 246,
+  "mean_rooms_per_class": 27.9
+ },
+ "lums-spr18": {
+  "courses": 313,
+  "configs": 313,
+  "subparts": 325,
+  "classes": 487,
+  "rooms": 73,
+  "class_room_rows": 13216,
+  "classes_with_parent": 52,
+  "max_parent_chain": 3,
+  "classes_without_rooms": 1,
+  "mean_rooms_per_class": 27.14
+ },
+ "mary-spr17": {
+  "courses": 544,
+  "configs": 544,
+  "subparts": 548,
+  "classes": 882,
+  "rooms": 90,
+  "class_room_rows": 10818,
+  "classes_with_parent": 5,
+  "max_parent_chain": 1,
+  "classes_without_rooms": 85,
+  "mean_rooms_per_class": 12.27
+ },
+ "muni-fi-spr16": {
+  "courses": 228,
+  "configs": 229,
+  "subparts": 327,
+  "classes": 575,
+  "rooms": 35,
+  "class_room_rows": 2409,
+  "classes_with_parent": 39,
+  "max_parent_chain": 5,
+  "classes_without_rooms": 75,
+  "mean_rooms_per_class": 4.19
+ },
+ "nbi-spr18": {
+  "courses": 404,
+  "configs": 404,
+  "subparts": 770,
+  "classes": 782,
+  "rooms": 67,
+  "class_room_rows": 3638,
+  "classes_with_parent": 106,
+  "max_parent_chain": 2,
+  "classes_without_rooms": 29,
+  "mean_rooms_per_class": 4.65
+ },
+ "pu-llr-spr17": {
+  "courses": 687,
+  "configs": 707,
+  "subparts": 789,
+  "classes": 1001,
+  "rooms": 75,
+  "class_room_rows": 14726,
+  "classes_with_parent": 62,
+  "max_parent_chain": 2,
+  "classes_without_rooms": 34,
+  "mean_rooms_per_class": 14.71
+ },
+ "tg-fal17": {
+  "courses": 36,
+  "configs": 36,
+  "subparts": 341,
+  "classes": 711,
+  "rooms": 23,
+  "class_room_rows": 3072,
+  "classes_with_parent": 274,
+  "max_parent_chain": 1,
+  "classes_without_rooms": 15,
+  "mean_rooms_per_class": 4.32
+ },
+ "yach-fal17": {
+  "courses": 91,
+  "configs": 93,
+  "subparts": 265,
+  "classes": 417,
+  "rooms": 33,
+  "class_room_rows": 1923,
+  "classes_with_parent": 270,
+  "max_parent_chain": 1,
+  "classes_without_rooms": 0,
+  "mean_rooms_per_class": 4.61
+ }
+}

@@ -1,0 +1,20 @@
+data.sql of 2026-08-16: 47,428 rows parsed across 35 tables
+deepest parent-course chain in the data: 1 link(s)
+entity types with no rows in this dump (9): AbstractRoom, AcademicGroupTimetableConstraint, CombinedGroup, DegreeProgramSemester, LecturerTimetableConstraint, LecturerWorkloadCandidateConstraint, LecturerWorkloadConstraint, LecturerWorkloadOnlineClass, RoomTimetableConstraint
+┌─────────┬─────────────────────────────┬──────┬────────┬─────────┬────────┬─────────┐
+│ (index) │ type                        │ rows │ perRow │ setWise │ levels │ ratio   │
+├─────────┼─────────────────────────────┼──────┼────────┼─────────┼────────┼─────────┤
+│ 0       │ 'Course'                    │ 200  │ 1017   │ 6       │ 3      │ '170x'  │
+│ 1       │ 'TimetableEntry'            │ 1381 │ 52044  │ 25      │ 7      │ '2082x' │
+│ 2       │ 'LecturerWorkload'          │ 500  │ 19172  │ 23      │ 6      │ '834x'  │
+│ 3       │ 'LecturerWorkloadCandidate' │ 6    │ 172    │ 18      │ 6      │ '10x'   │
+└─────────┴─────────────────────────────┴──────┴────────┴─────────┴────────┴─────────┘
+  L0   2  (caller)
+  L1   1  TimetableEntry
+  L2   5  LecturerWorkload, Room
+  L3   5  WorkingCurriculumItem, Lecturer, AcademicGroup, CombinedWorkingCurriculumItem, Faculty
+  L4   5  Department, CurriculumItemHours, Course, DegreeProgram, WorkingCurriculumItem
+  L5   4  Faculty, CurriculumItem, Course, CurriculumItemHours
+  L6   2  Course, CurriculumItem
+  L7   1  Course
+wrote /home/claude/repo2/r/results/replay/queries.tex, trace.tex, trace-facts.tex

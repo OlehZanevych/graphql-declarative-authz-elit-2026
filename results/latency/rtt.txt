@@ -1,0 +1,4 @@
+port 5432: 115 us per select
+port 6545: 1327 us per select
+port 5432: 120 us per select
+port 6545: 1223 us per select

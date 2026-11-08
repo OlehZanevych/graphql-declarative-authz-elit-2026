@@ -1,0 +1,45 @@
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by io.netty.util.internal.NativeLibraryUtil in an unnamed module (jar:nested:/home/claude/repo2/r/app/target/timetable-0.0.1-SNAPSHOT.jar/!BOOT-INF/lib/netty-common-4.2.12.Final.jar!/)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+check nbi-spr18/1              set=    6 perrow=      6 answered=0/1 equal=true
+check nbi-spr18/10             set=    6 perrow=     42 answered=0/10 equal=true
+check nbi-spr18/50             set=    6 perrow=    250 answered=12/50 equal=true
+check nbi-spr18/200            set=    6 perrow=    906 answered=40/200 equal=true
+check nbi-spr18/782            set=    6 perrow=   3562 answered=122/782 equal=true
+run 4 warmup round 1 done
+run 4 warmup round 2 done
+run 4 warmup round 3 done
+run 4 warmup round 4 done
+run 4 warmup round 5 done
+run 4 measure round 6 done
+run 4 measure round 7 done
+run 4 measure round 8 done
+run 4 measure round 9 done
+run 4 measure round 10 done
+run 4 measure round 11 done
+run 4 measure round 12 done
+run 4 measure round 13 done
+run 4 measure round 14 done
+run 4 measure round 15 done
+run 4 measure round 16 done
+run 4 measure round 17 done
+run 4 measure round 18 done
+run 4 measure round 19 done
+run 4 measure round 20 done
+run 4 measure round 21 done
+run 4 measure round 22 done
+run 4 measure round 23 done
+run 4 measure round 24 done
+run 4 measure round 25 done
+run 4 measure round 26 done
+run 4 measure round 27 done
+run 4 measure round 28 done
+run 4 measure round 29 done
+run 4 measure round 30 done
+run 4 measure round 31 done
+run 4 measure round 32 done
+run 4 measure round 33 done
+run 4 measure round 34 done
+run 4 measure round 35 done

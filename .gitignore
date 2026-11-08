@@ -1,0 +1,5 @@
+app/target/
+data/itc2019/xml/
+*.class
+.idea/
+.DS_Store

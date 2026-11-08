@@ -1,0 +1,39 @@
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by io.netty.util.internal.NativeLibraryUtil in an unnamed module (jar:nested:/home/claude/repo2/r/app/target/timetable-0.0.1-SNAPSHOT.jar/!BOOT-INF/lib/netty-common-4.2.12.Final.jar!/)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+S1   PASS  Revocation committed before a protected operation enters synchronization
+     baseline:  field 2 ALLOWED from cached grants; write committed after the revocation
+     prototype: field 2 denied (fresh evaluator inside its own unit); course unchanged=true
+S2   PASS  Authorized operation enters first; revocation starts while it is in progress
+     baseline:  revocation committed while the writer was paused; write committed AFTER it, justified only by the revoked grant
+     prototype: revocation blocked on the domain lock until the write committed; write committed; revocation then committed=true
+S3   PASS  Re-parenting an ancestor while another operation checks and writes a descendant
+     baseline:  write committed after the department left faculty 1; a fresh check now says denied
+     prototype: re-parent waited for the write; write committed first; in the opposite order the write is denied
+S0   PASS  Grants and ancestry change together while one evaluation is between its statements
+     baseline:  ALLOWED: grants from S0 combined with ancestry from S1
+     prototype: lock: swap waited, answer denied (S0); RR snapshot (advisory, no lock): swap committed during it, answer denied (S0)
+S4   PASS  Same request: an earlier mutation changes ancestry, a later one checks a descendant
+     baseline:  field 1 authorized (pre=true, post=true, attach=true); field 2 delete ALLOWED from the memoised MANAGE of the department
+     prototype: evaluator discarded after field 1; field 2 sees level EDIT, delete denied
+S5   PASS  Caller removed from the group that carries the grant
+     baseline:  before=true; after, same evaluator: ALLOWED (cached group grants)
+     prototype: after invalidation: denied (membership reloaded)
+S6   PASS  Cached descendant after its join-table edge to the granted ancestor is removed
+     baseline:  before=true; after, same evaluator: ALLOWED (memoised)
+     prototype: after invalidation: denied (recomputed)
+S7   PASS  Cached denial, then a valid grant is added
+     baseline:  before=false; after, same evaluator: DENIED (cached denial)
+     prototype: after invalidation: allowed
+S8   PASS  Failure after evaluation and write; retry after a revocation
+     baseline:  failure after the write: write REMAINS committed
+     prototype: attempt 1 rolled back (course name 'TEST course'); retry built evaluator #2 after the revocation and was denied; epoch advanced only by the revocation (43?44)
+S9   PASS  Old asynchronous computation completes after invalidation
+     baseline:  (the deployed evaluator is never replaced within a request)
+     prototype: old computation returned false into the discarded evaluator; current generation answers false before and false after it
+S10  PASS  Two application instances: protected writes vs grant revoke/restore, concurrently
+     baseline:  55 unjustified of 182 committed writes; 84 written in a different authorization state than the one their check began in; 220 grant toggles
+     prototype: 0 unjustified of 191 committed writes; 0 written in a different authorization state than the one their check began in; 169 grant toggles
+ALL PASS (11)
