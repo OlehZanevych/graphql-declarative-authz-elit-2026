@@ -315,9 +315,18 @@ function walk(startType, startIds) {
 
 /**
  * The naive per-row strategy, over the same data: for each row independently, climb its ancestry
- * following every distinct path, one statement per parent identifier fetched, remembering nothing
- * between rows. Counted over G_I rather than over the schema, so an unpopulated optional edge costs
- * nothing here — which is why this number is smaller than the schema-derived one it replaces.
+ * following every distinct path, remembering nothing between rows. Its statement accounting is the
+ * one the executed baseline (app/src/experiments/.../bench/PerRowEvaluator.java) issues against the
+ * database: per visited row vertex, ONE statement that reads all of its table's foreign-key parent
+ * columns together (if the table has any), plus ONE statement per join-table parent edge of its
+ * type, whatever those statements return. An unpopulated optional foreign key therefore still costs
+ * the row's foreign-key statement, and an empty join table still costs its statement; a parent
+ * already on the current path (a cycle) is not climbed again. Counted over G_I.
+ *
+ * Revision note (2026-11-08): the earlier version charged one statement per populated parent LINK
+ * (one per non-null foreign key and one per join row). That edge-at-a-time model gave 1 017, 52 044,
+ * 19 172 and 172 for the four requests; it is replaced by the model above, which coincides with the
+ * statements counted on PostgreSQL for the executed baseline (812, 43 033, 16 192 and 152).
  */
 function walkPerRow(startType, startIds) {
   let q = 0;
@@ -325,17 +334,17 @@ function walkPerRow(startType, startIds) {
     const spec = SPEC[type];
     if (!spec) return;
     const row = BY_ID[type].get(id);
+    if (spec.fk.length) q++;                       // one SELECT of all FK parent columns of this row
     for (const e of spec.fk) {
       const pid = row?.[e.column];
       if (pid == null) continue;
-      q++;
       const k = `${e.parent}#${pid}`;
       if (onPath.has(k)) continue;
       onPath.add(k); climb(e.parent, pid, onPath); onPath.delete(k);
     }
     for (const j of spec.join) {
+      q++;                                         // one SELECT per join-table parent edge
       for (const pid of JOIN_INDEX[j.table].get(id) ?? []) {
-        q++;
         const k = `${j.parent}#${pid}`;
         if (onPath.has(k)) continue;
         onPath.add(k); climb(j.parent, pid, onPath); onPath.delete(k);

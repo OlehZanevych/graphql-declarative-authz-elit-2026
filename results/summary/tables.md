@@ -1,13 +1,13 @@
 ### Statement counts replayed on the snapshot (article Table 2)
 
-Exact counts of the statements each strategy issues for the question "which of these rows may this caller edit?", replayed by `replay/instancegraph.mjs` over `data/lnu/data-anonymised.sql`.
+Exact counts of the statements each strategy issues for the question "which of these rows may this caller edit?", replayed by `replay/instancegraph.mjs` over `data/lnu/data-anonymised.sql`. The per-row model charges what the executed baseline issues: per visited row, one statement for all foreign-key parent columns of its table (if any) and one per join-table parent edge; the counts equal those measured on PostgreSQL below.
 
 | Request | Rows | Per-row statements | Set-at-a-time statements | Ratio |
 |---|---:|---:|---:|---:|
-| Course | 200 | 1 017 | 6 | 170× |
-| TimetableEntry | 1 381 | 52 044 | 25 | 2 082× |
-| LecturerWorkload | 500 | 19 172 | 23 | 834× |
-| LecturerWorkloadCandidate | 6 | 172 | 18 | 10× |
+| Course | 200 | 812 | 6 | 135× |
+| TimetableEntry | 1 381 | 43 033 | 25 | 1 721× |
+| LecturerWorkload | 500 | 16 192 | 23 | 704× |
+| LecturerWorkloadCandidate | 6 | 152 | 18 | 8× |
 
 ### Level-by-level statement trace of the TimetableEntry request (§7.5; Table 4 of the reviewed version)
 
@@ -26,7 +26,7 @@ All 1 381 timetable entries; level 0 is the two setup statements (the caller's m
 
 ### Algorithm 1 check (§6.3)
 
-Algorithm 1 against a reference evaluator (`replay/algocheck.mjs`): 2 000 random instance graphs, 6 775 questions, 17 942 row answers; all agree.
+Algorithm 1 against a reference evaluator (`replay/algocheck.mjs`): 2 000 random instance graphs, 6 775 questions, 17 942 row answers; all agree. A separate 40-link chain reaches the depth backstop: the truncated answer only under-approximates and is not memoised, and a later question within the backstop gets the exact level (OK).
 
 ### Measured latency on the snapshot, co-located with the database (article Table 3)
 

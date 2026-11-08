@@ -4,10 +4,10 @@ entity types with no rows in this dump (9): AbstractRoom, AcademicGroupTimetable
 ┌─────────┬─────────────────────────────┬──────┬────────┬─────────┬────────┬─────────┐
 │ (index) │ type                        │ rows │ perRow │ setWise │ levels │ ratio   │
 ├─────────┼─────────────────────────────┼──────┼────────┼─────────┼────────┼─────────┤
-│ 0       │ 'Course'                    │ 200  │ 1017   │ 6       │ 3      │ '170x'  │
-│ 1       │ 'TimetableEntry'            │ 1381 │ 52044  │ 25      │ 7      │ '2082x' │
-│ 2       │ 'LecturerWorkload'          │ 500  │ 19172  │ 23      │ 6      │ '834x'  │
-│ 3       │ 'LecturerWorkloadCandidate' │ 6    │ 172    │ 18      │ 6      │ '10x'   │
+│ 0       │ 'Course'                    │ 200  │ 812    │ 6       │ 3      │ '135x'  │
+│ 1       │ 'TimetableEntry'            │ 1381 │ 43033  │ 25      │ 7      │ '1721x' │
+│ 2       │ 'LecturerWorkload'          │ 500  │ 16192  │ 23      │ 6      │ '704x'  │
+│ 3       │ 'LecturerWorkloadCandidate' │ 6    │ 152    │ 18      │ 6      │ '8x'    │
 └─────────┴─────────────────────────────┴──────┴────────┴─────────┴────────┴─────────┘
   L0   2  (caller)
   L1   1  TimetableEntry

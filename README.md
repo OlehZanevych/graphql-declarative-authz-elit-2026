@@ -22,6 +22,21 @@ The repository holds:
 Licence: [PolyForm Noncommercial 1.0.0](LICENSE.md) (data and third-party components keep their own
 terms; see the licence file).
 
+**Versions.** The article cites this repository at the release tag `elit-2026-rev2`. Three revisions are
+involved and kept apart: the application source (LNU Timetable commit `6c2a082`, identical to `6ec3e9a` for
+`app/`), the evaluation code and data (this repository at that tag), and the collection date of the raw
+measurements (2026-11-08).
+
+**Revision note (2026-11-08, after review).** The replayed per-row count (`replay/instancegraph.mjs`,
+`walkPerRow`) used to charge one statement per populated parent link, which gave 1 017, 52 044, 19 172 and
+172 for the four requests of article Table 2. It now charges what the executed baseline
+(`PerRowEvaluator`) issues: per visited row, one statement for all foreign-key parent columns of its table
+and one per join-table parent edge, which gives 812, 43 033, 16 192 and 152, identical to the counts
+measured on PostgreSQL. The set-at-a-time counts are unchanged. `replay/algocheck.mjs` now uses the
+application's three access levels (it had an extra `VIEW` level) and adds a case that reaches the depth
+backstop; its totals are unchanged. Only the replay and the analysis were rerun for this note; the timed
+measurements are those collected on 2026-11-08.
+
 ## Summary of the results
 
 All numbers below and in the article come from the files in `results/`, produced on 2026-11-08 by one pass
@@ -33,14 +48,14 @@ in the evaluation environment) and run on a Java 25.0.2 runtime; the project its
 <!-- results:begin -->
 ### Statement counts replayed on the snapshot (article Table 2)
 
-Exact counts of the statements each strategy issues for the question "which of these rows may this caller edit?", replayed by `replay/instancegraph.mjs` over `data/lnu/data-anonymised.sql`.
+Exact counts of the statements each strategy issues for the question "which of these rows may this caller edit?", replayed by `replay/instancegraph.mjs` over `data/lnu/data-anonymised.sql`. The per-row model charges what the executed baseline issues: per visited row, one statement for all foreign-key parent columns of its table (if any) and one per join-table parent edge; the counts equal those measured on PostgreSQL below.
 
 | Request | Rows | Per-row statements | Set-at-a-time statements | Ratio |
 |---|---:|---:|---:|---:|
-| Course | 200 | 1 017 | 6 | 170× |
-| TimetableEntry | 1 381 | 52 044 | 25 | 2 082× |
-| LecturerWorkload | 500 | 19 172 | 23 | 834× |
-| LecturerWorkloadCandidate | 6 | 172 | 18 | 10× |
+| Course | 200 | 812 | 6 | 135× |
+| TimetableEntry | 1 381 | 43 033 | 25 | 1 721× |
+| LecturerWorkload | 500 | 16 192 | 23 | 704× |
+| LecturerWorkloadCandidate | 6 | 152 | 18 | 8× |
 
 ### Level-by-level statement trace of the TimetableEntry request (§7.5; Table 4 of the reviewed version)
 
@@ -59,7 +74,7 @@ All 1 381 timetable entries; level 0 is the two setup statements (the caller's m
 
 ### Algorithm 1 check (§6.3)
 
-Algorithm 1 against a reference evaluator (`replay/algocheck.mjs`): 2 000 random instance graphs, 6 775 questions, 17 942 row answers; all agree.
+Algorithm 1 against a reference evaluator (`replay/algocheck.mjs`): 2 000 random instance graphs, 6 775 questions, 17 942 row answers; all agree. A separate 40-link chain reaches the depth backstop: the truncated answer only under-approximates and is not memoised, and a later question within the backstop gets the exact level (OK).
 
 ### Measured latency on the snapshot, co-located with the database (article Table 3)
 
@@ -282,6 +297,15 @@ To run the application itself rather than the experiments, see [`app/README.md`]
   it, which makes S0–S9 deterministic; S10 is randomized (400 write attempts on one instance while the
   other toggles the grant every 1–10 ms). The fixture rows (caller 2001, department 9001, courses 9101 and
   9102, group 901) are added to the scratch database `lnu_cons` only.
+- **Scope of the consistency prototype.** `AuthzProtocol` protects a unit only if every writer of
+  grants, memberships and permission-bearing relationships (administrative, import and background jobs
+  included) takes the same `authz_domain` lock; an ordinary SQL update outside the protocol is not blocked.
+  The lock row `authz_domain(id = 1)` must exist (the tests create it); the prototype does not reject a
+  missing row, so it must not be used as a general safety mechanism as it stands. `run()` executes one unit;
+  retrying a failed unit (resubscribing to the whole transactional unit, with a fresh evaluator) is done by
+  the caller, as the tests do. `RequestAuthzContext` replaces the evaluator; it does not cancel work still
+  running on the old one, whose results reach no later check. The schedules validate these mechanisms; they
+  do not prove arbitrary transactional histories correct.
 - **Protocol cost.** A protected update of one course; released evaluator versus the protocol with share
   locks and with an exclusive lock for every unit; one client (100 warm-up and 300 measured interleaved
   triplets per run) and 1, 4 and 16 concurrent clients for 3 s per cell, without and then with an

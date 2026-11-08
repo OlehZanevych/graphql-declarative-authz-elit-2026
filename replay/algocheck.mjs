@@ -49,8 +49,8 @@ const pick = (a) => a[Math.floor(rnd() * a.length)];
 const chance = (p) => rnd() < p;
 
 // ── the lattice ──────────────────────────────────────────────────────────────
-// Four levels, ordered. `null` is bottom: no access at all.
-const LEVELS = ['VIEW', 'EDIT', 'FULL', 'MANAGE'];
+// Three levels, ordered as the application's AccessLevel (EDIT < FULL < MANAGE). `null` is bottom: no access.
+const LEVELS = ['EDIT', 'FULL', 'MANAGE'];   // the application's AccessLevel values; no grant is null
 const rank = (l) => (l === null ? -1 : LEVELS.indexOf(l));
 const max = (a, b) => (rank(a) >= rank(b) ? a : b);
 
@@ -221,6 +221,28 @@ for (let n = 0; n < GRAPHS; n++) {
     }
   }
 }
+
+// ── the depth backstop, deliberately reached ─────────────────────────────────
+// The random graphs above are small, so none of them reaches MAX_DEPTH. This deterministic case
+// does: a chain C#0 -> C#1 -> ... -> C#40 with the only grant (MANAGE) on C#40 and EDIT on C#5.
+// From C#0 the walk must stop at the backstop and may under-approximate (EDIT instead of MANAGE),
+// and nothing it computed may be memoised: a later question about C#10, whose ancestry fits within
+// the backstop, must still get MANAGE from the same evaluator.
+const backstop = (() => {
+  const len = 40;
+  const vertices = Array.from({ length: len + 1 }, (_, i) => ({ id: `C#${i}`, type: 'C', parents: i < len ? [`C#${i + 1}`] : [] }));
+  const g = { types: ['C'], vertices, byId: Object.fromEntries(vertices.map((v) => [v.id, v])),
+              perType: { C: vertices.map((v) => v.id) }, grants: { 'C#40': 'MANAGE', 'C#5': 'EDIT' }, global: null };
+  const evaluate = makeEvaluator(g, MAX_DEPTH);
+  const first = evaluate('C', [0]);
+  const later = evaluate('C', [10]);
+  const ok = first.truncated && rank(first.out[0]) <= rank(reference(g, 'C', [0])[0])
+    && !later.truncated && later.out[10] === reference(g, 'C', [10])[10];
+  return { ok, first: first.out[0], firstTruncated: first.truncated, later: later.out[10] };
+})();
+console.log(`depth backstop case: truncated=${backstop.firstTruncated} (answer ${backstop.first}, under-approximation allowed); ` +
+  `later question within the backstop answered ${backstop.later} — ${backstop.ok ? 'OK' : 'FAILED'}`);
+if (!backstop.ok) { console.error('the depth-backstop case failed'); process.exit(1); }
 
 console.log(`${graphs} random instance graphs, ${questions} questions, ${rows} row answers`);
 console.log(`${truncations} evaluation(s) hit the depth backstop and were not compared`);

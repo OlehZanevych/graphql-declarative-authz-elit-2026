@@ -17,7 +17,9 @@ out = []; w = out.append
 
 w('### Statement counts replayed on the snapshot (article Table 2)\n')
 w('Exact counts of the statements each strategy issues for the question "which of these rows may this caller edit?", '
-  'replayed by `replay/instancegraph.mjs` over `data/lnu/data-anonymised.sql`.\n')
+  'replayed by `replay/instancegraph.mjs` over `data/lnu/data-anonymised.sql`. The per-row model charges what the '
+  'executed baseline issues: per visited row, one statement for all foreign-key parent columns of its table (if any) '
+  'and one per join-table parent edge; the counts equal those measured on PostgreSQL below.\n')
 w('| Request | Rows | Per-row statements | Set-at-a-time statements | Ratio |'); w('|---|---:|---:|---:|---:|')
 q = open(os.path.join(R, 'replay', 'queries.tex')).read()
 for m in re.finditer(r'\\texttt\{(\w+)\} & ([\d\\,]+) & ([\d\\,]+) & ([\d\\,]+) & ([\d\\,]+)\$', q):
@@ -35,7 +37,10 @@ m = re.search(r'(\d+) random instance graphs, (\d+) questions, (\d+) row answers
 agreed = 'agreed with the reference evaluator on every row' in a
 w('\n### Algorithm 1 check (§6.3)\n')
 w('Algorithm 1 against a reference evaluator (`replay/algocheck.mjs`): %s random instance graphs, %s questions, '
-  '%s row answers; %s.\n' % (th(int(m[1])), th(int(m[2])), th(int(m[3])), 'all agree' if agreed else '**DISAGREEMENT**'))
+  '%s row answers; %s. ' % (th(int(m[1])), th(int(m[2])), th(int(m[3])), 'all agree' if agreed else '**DISAGREEMENT**')
+  + ('A separate 40-link chain reaches the depth backstop: the truncated answer only under-approximates and is not '
+     'memoised, and a later question within the backstop gets the exact level (%s).\n'
+     % ('OK' if re.search(r'depth backstop case: .*OK', a) else '**FAILED**')))
 
 for cond, title in (('loopback', 'co-located with the database'), ('relay', 'through the relay (250 µs each way)')):
     L = lat[cond]

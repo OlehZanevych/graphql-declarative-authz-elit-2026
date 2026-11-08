@@ -1,3 +1,4 @@
+depth backstop case: truncated=true (answer EDIT, under-approximation allowed); later question within the backstop answered MANAGE — OK
 2000 random instance graphs, 6775 questions, 17942 row answers
 0 evaluation(s) hit the depth backstop and were not compared
 Algorithm 1 agreed with the reference evaluator on every row of every question.
